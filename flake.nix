@@ -21,7 +21,7 @@
 
         # All build/runtime deps — mirrors what config.mk expects via pkg-config
         buildDeps = with pkgs; [
-          wlroots_0_18 # or just `wlroots` — match your target version
+          wlroots
           wayland
           wayland-protocols
           wayland-scanner
