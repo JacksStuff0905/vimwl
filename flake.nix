@@ -4,16 +4,24 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    nvim-nix.url = "github:JacksStuff0905/nvim-nix";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      ...
+    }@inputs:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
         # All build/runtime deps — mirrors what config.mk expects via pkg-config
         buildDeps = with pkgs; [
-          wlroots_0_18      # or just `wlroots` — match your target version
+          wlroots_0_18 # or just `wlroots` — match your target version
           wayland
           wayland-protocols
           wayland-scanner
@@ -21,14 +29,25 @@
           libxkbcommon
           pixman
           libdrm
-          fcft               # if you add status bar patches
+          fcft # if you add status bar patches
         ];
+
+        devUtils =
+          with pkgs;
+          let
+            nvim = inputs.nvim-nix.packages."${system}".full;
+          in
+          [
+            nvim
+            zsh
+            jdk
+          ];
 
         xwaylandDeps = with pkgs; [
           xwayland
           libxcb
           xcbutilwm
-          xorg.xcbutilwm
+          libxcb-wm
         ];
 
         nativeBuildDeps = with pkgs; [
@@ -54,7 +73,7 @@
 
           makeFlags = [
             "PREFIX=$(out)"
-            "XWAYLAND=-DXWAYLAND"   # remove if you don't want Xwayland
+            "XWAYLAND=-DXWAYLAND" # remove if you don't want Xwayland
           ];
 
           meta.mainProgram = "dwl";
@@ -64,11 +83,11 @@
           name = "vimwl-dev";
 
           nativeBuildInputs = nativeBuildDeps;
-          buildInputs = buildDeps ++ xwaylandDeps;
+          buildInputs = buildDeps ++ xwaylandDeps ++ devUtils;
 
-          # Nix-specific: help pkg-config and the compiler find headers/libs
           shellHook = ''
-            echo "vimwl dev shell ready — just run 'make'"
+            echo "vimwl development env loaded, use 'make' to build"
+            exec zsh
           '';
         };
       }
