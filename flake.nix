@@ -30,6 +30,13 @@
           pixman
           libdrm
           fcft # if you add status bar patches
+
+          # Debugging
+          gdb
+
+          # for bars
+          cairo
+          pango
         ];
 
         devUtils =

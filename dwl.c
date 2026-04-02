@@ -5,11 +5,13 @@
 #include <libinput.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -92,11 +94,11 @@
     wl_signal_add((E), _l);                                                    \
   } while (0)
 
-#define applytoselect(monitor, client, body)                                   \
+#define applytoselect(monitor, client, ...)                                    \
   Client *_tmp;                                                                \
   wl_list_for_each_reverse_safe(client, _tmp, &selstack, slink) {              \
     if (VISIBLEON(client, monitor)) {                                          \
-      body                                                                     \
+      __VA_ARGS__                                                              \
     }                                                                          \
   }
 
@@ -181,18 +183,52 @@ typedef struct {
   uint32_t resize; /* configure serial of a pending resize */
 } Client;
 
+typedef struct Key Key;
+
 typedef struct {
+  struct {
+    void (*func)(const Arg *);
+    Arg arg;
+    uint8_t setvimmode;
+  };
+  Key *start;
+} Action;
+
+struct Key {
   uint32_t vimmode;
   uint32_t mod;
   xkb_keysym_t keysym;
-  void (*func)(const Arg *);
-  const Arg arg;
-} Key;
+  xkb_keysym_t altkeysym;
+  struct {
+    Key *key;
+    Action *action;
+  } next;
+};
 
 typedef struct {
-  xkb_keysym_t keysym;
+  const char *key;
+  const int size;
+  const char **aliases;
+} KeyAlias;
+
+typedef struct {
   uint32_t vimmode;
+  char *keysstr;
+  void (*func)(const Arg *);
+  const Arg arg;
+} KeyMap;
+
+typedef struct {
+  char *keysstr;
+  uint8_t vimmode;
 } VimModeKey;
+
+typedef struct {
+  xkb_keysym_t leadersym;
+  void (*func)(const Arg *);
+  const Arg arg;
+  xkb_keysym_t keysyms[];
+} LeaderKey;
 
 typedef struct {
   struct wlr_keyboard_group *wlr_group;
@@ -329,7 +365,7 @@ static void destroysessionlock(struct wl_listener *listener, void *data);
 static void destroykeyboardgroup(struct wl_listener *listener, void *data);
 static Monitor *dirtomon(enum wlr_direction dir);
 static void focusclient(Client *c, int lift);
-static void removefromselection(Client *c);
+static void removeselection(Client *c);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
 static Client *focustop(Monitor *m);
@@ -402,6 +438,9 @@ static void xytonode(double x, double y, struct wlr_surface **psurface,
 static void zoom(const Arg *arg);
 
 static int setvimmode(const uint8_t mode);
+static void makekeys();
+static int set_mods(Key *ref, char **str);
+static void set_key(Key *ref, char *str);
 
 /* variables */
 static pid_t child_pid = -1;
@@ -413,7 +452,7 @@ static struct wlr_backend *backend;
 static struct wlr_scene *scene;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
-static uint32_t vimmode = VIM_MODE_NORMAL;
+static uint8_t vimmode = VIM_MODE_NORMAL;
 
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
 static const int layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
@@ -507,6 +546,54 @@ static struct wlr_xwayland *xwayland;
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
+
+/* keys' size is determined from keymaps and vimmodekeys, so it needs to get
+ * declared after including config.h */
+static Key *keys[LENGTH(keymaps) + LENGTH(vimmodekeys)];
+
+const KeyAlias key_aliases[] = {
+    {vimleader, 1, (const char *[]){"leader"}},
+
+    {"space", 1, (const char *[]){" "}},
+
+    {"Return", 2, (const char *[]){"CR", "Enter"}},
+    {"Delete", 1, (const char *[]){"Del"}},
+    {"Insert", 1, (const char *[]){"Ins"}},
+    {"Escape", 1, (const char *[]){"Esc"}},
+
+    {"exclam", 1, (const char *[]){"!"}},
+    {"at", 1, (const char *[]){"@"}},
+    {"numbersign", 1, (const char *[]){"#"}},
+    {"dollar", 1, (const char *[]){"$"}},
+    {"percent", 1, (const char *[]){"%"}},
+    {"asciicircum", 1, (const char *[]){"^"}},
+    {"ampersand", 1, (const char *[]){"&"}},
+    {"asterisk", 1, (const char *[]){"*"}},
+    {"parenleft", 1, (const char *[]){"("}},
+    {"parenright", 1, (const char *[]){")"}},
+    {"minus", 1, (const char *[]){"-"}},
+    {"plus", 1, (const char *[]){"+"}},
+    {"equal", 1, (const char *[]){"="}},
+    {"bracketleft", 1, (const char *[]){"["}},
+    {"bracketright", 1, (const char *[]){"]"}},
+    {"braceleft", 1, (const char *[]){"{"}},
+    {"braceright", 1, (const char *[]){"}"}},
+    {"backslash", 1, (const char *[]){"\\"}},
+    {"bar", 1, (const char *[]){"|"}},
+    {"semicolon", 1, (const char *[]){";"}},
+    {"apostrophe", 1, (const char *[]){"'"}},
+    {"comma", 1, (const char *[]){","}},
+    {"period", 1, (const char *[]){"."}},
+    {"slash", 1, (const char *[]){"/"}},
+    {"asciitilde", 1, (const char *[]){"~"}},
+    {"grave", 1, (const char *[]){"`"}},
+    {"less", 1, (const char *[]){"<"}},
+    {"greater", 1, (const char *[]){">"}},
+    {"quotedbl", 1, (const char *[]){"\""}},
+    {"colon", 1, (const char *[]){":"}},
+    {"question", 1, (const char *[]){"?"}},
+    {"underscore", 1, (const char *[]){"_"}},
+};
 
 /* attempt to encapsulate suck into one file */
 #include "client.h"
@@ -1361,6 +1448,7 @@ void destroynotify(struct wl_listener *listener, void *data) {
     wl_list_remove(&c->unmap.link);
     wl_list_remove(&c->maximize.link);
   }
+  wl_list_remove(&c->slink);
   free(c);
 }
 
@@ -1407,10 +1495,7 @@ Monitor *dirtomon(enum wlr_direction dir) {
 }
 
 void focusclient(Client *c, int lift) {
-  struct wlr_surface *old = seat->keyboard_state.focused_surface;
-  int unused_lx, unused_ly, old_client_type;
   Client *old_c = NULL;
-  LayerSurface *old_l = NULL;
 
   if (locked)
     return;
@@ -1419,15 +1504,48 @@ void focusclient(Client *c, int lift) {
   if (c && lift)
     wlr_scene_node_raise_to_top(&c->scene->node);
 
-  if (c && client_surface(c) == old)
-    return;
-
-  if ((old_client_type = toplevel_from_wlr_surface(old, &old_c, &old_l)) ==
-      XDGShell) {
-    struct wlr_xdg_popup *popup, *tmp;
-    wl_list_for_each_safe(popup, tmp, &old_c->surface.xdg->popups, link)
-        wlr_xdg_popup_destroy(popup);
+  if (vimmode != VIM_MODE_INSERT) {
+    // Unfocus all clients, since not in insert mode
+    wlr_seat_keyboard_clear_focus(seat);
   }
+
+  applytoselect(selmon, old_c, {
+    int unused_lx, unused_ly, old_client_type;
+    LayerSurface *old_l = NULL;
+
+    if (c && client_surface(c) == client_surface(old_c))
+      return;
+
+    if ((old_client_type = toplevel_from_wlr_surface(
+             client_surface(old_c), &old_c, &old_l)) == XDGShell) {
+      struct wlr_xdg_popup *popup, *tmp;
+      wl_list_for_each_safe(popup, tmp, &old_c->surface.xdg->popups, link)
+          wlr_xdg_popup_destroy(popup);
+    }
+
+    /* Deactivate old client if focus is changing */
+    if (client_surface(old_c) &&
+        (!c || client_surface(c) != client_surface(old_c))) {
+      /* If an overlay is focused, don't focus or activate the client,
+       * but only update its position in fstack to render its border with
+       * focuscolor and focus it after the overlay is closed. */
+      if (old_client_type == LayerShell &&
+          wlr_scene_node_coords(&old_l->scene->node, &unused_lx, &unused_ly) &&
+          old_l->layer_surface->current.layer >=
+              ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+        return;
+      } else if (old_c && old_c == exclusive_focus &&
+                 client_wants_focus(old_c)) {
+        return;
+        /* Don't deactivate old client if the new one wants focus, as this
+         * causes issues with winecfg and probably other clients */
+      } else if (old_c && !client_is_unmanaged(old_c) &&
+                 (!c || !client_wants_focus(c)) && vimmode != VIM_MODE_VISUAL) {
+        // Remove from selection stack
+        removeselection(old_c);
+      }
+    }
+  });
 
   /* Put the new client atop the focus stack and select its monitor */
   if (c && !client_is_unmanaged(c)) {
@@ -1435,14 +1553,8 @@ void focusclient(Client *c, int lift) {
     wl_list_insert(&fstack, &c->flink);
 
     /* Put the client atop the selection stack */
-    Client *sel;
-    bool dupl = false;
-    wl_list_for_each(sel, &selstack, slink) {
-      if (sel == c)
-        dupl = true;
-    }
-    if (!dupl)
-      wl_list_insert(&selstack, &c->slink);
+    wl_list_init(&c->slink);
+    wl_list_insert(&selstack, &c->slink);
 
     selmon = c->mon;
     c->isurgent = 0;
@@ -1453,25 +1565,6 @@ void focusclient(Client *c, int lift) {
       client_set_border_color(c, focuscolor);
   }
 
-  /* Deactivate old client if focus is changing */
-  if (old && (!c || client_surface(c) != old)) {
-    /* If an overlay is focused, don't focus or activate the client,
-     * but only update its position in fstack to render its border with
-     * focuscolor and focus it after the overlay is closed. */
-    if (old_client_type == LayerShell &&
-        wlr_scene_node_coords(&old_l->scene->node, &unused_lx, &unused_ly) &&
-        old_l->layer_surface->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
-      return;
-    } else if (old_c && old_c == exclusive_focus && client_wants_focus(old_c)) {
-      return;
-      /* Don't deactivate old client if the new one wants focus, as this causes
-       * issues with winecfg and probably other clients */
-    } else if (old_c && !client_is_unmanaged(old_c) &&
-               (!c || !client_wants_focus(c)) && vimmode != VIM_MODE_VISUAL) {
-      // Remove from selection stack
-      removefromselection(old_c);
-    }
-  }
   printstatus();
 
   if (!c) {
@@ -1483,15 +1576,19 @@ void focusclient(Client *c, int lift) {
   /* Change cursor surface */
   motionnotify(0, NULL, 0, 0, 0, 0);
 
-  /* Have a client, so focus its top-level wlr_surface */
   client_notify_enter(client_surface(c), wlr_seat_get_keyboard(seat));
-
-  /* Activate the new client */
-  client_activate_surface(client_surface(c), 1);
+  wlr_seat_keyboard_clear_focus(seat);
 }
 
-void removefromselection(Client *c) {
-  wl_list_remove(&c->slink);
+void removeselection(Client *c) {
+  if (!c) {
+    return;
+  }
+
+  if (!wl_list_empty(&selstack)) {
+    wl_list_remove(&c->slink);
+    wl_list_init(&c->slink);
+  }
 
   client_set_border_color(c, bordercolor);
 
@@ -1621,20 +1718,27 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
    * processing keys, rather than passing them on to the client for its own
    * processing.
    */
-  const VimModeKey *vk;
-  for (vk = vimmodekeys; vk < END(vimmodekeys); vk++) {
-    if (sym == vk->keysym) {
-      if (setvimmode(vk->vimmode))
-        return 1;
-      break;
-    }
-  }
 
-  const Key *k;
-  for (k = keys; k < END(keys); k++) {
-    if (vimmode & k->vimmode && CLEANMASK(mods) == CLEANMASK(k->mod) &&
-        xkb_keysym_to_lower(sym) == xkb_keysym_to_lower(k->keysym) && k->func) {
-      k->func(&k->arg);
+  char symname[64];
+  xkb_keysym_get_name(sym, symname, sizeof(symname));
+
+  Key **k;
+  for (k = &(keys[0]); k < END(keys); k++) {
+    xkb_keysym_get_name((*k)->keysym, symname, sizeof(symname));
+    if (vimmode & ((*k)->vimmode) && CLEANMASK(mods) == CLEANMASK((*k)->mod) &&
+        (sym == (*k)->keysym || sym == (*k)->altkeysym)) {
+      if ((*k)->next.action) {
+        if ((*k)->next.action->func) {
+          // Key chain finished -> process action
+          (*k)->next.action->func(&((*k)->next.action->arg));
+          *k = (*k)->next.action->start;
+        } else if ((*k)->next.action->setvimmode != -1) {
+          setvimmode((*k)->next.action->setvimmode);
+        }
+      } else if ((*k)->next.key) {
+        // Key chain not finished -> continue it
+        *k = (*k)->next.key;
+      }
       return 1;
     }
   }
@@ -1655,20 +1759,23 @@ void keypress(struct wl_listener *listener, void *data) {
                                      keycode, &syms);
 
   int handled = 0;
-  uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
 
-  /*printf("keycode: %d\n", keycode);
-  printf("mods: %d\n", CLEANMASK(mask));
-  printf("mod: %d\n", MODKEY);*/
-  printf("Current vimmode: %d\n", vimmode);
+  uint32_t raw_mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
+
+  xkb_mod_mask_t consumed = xkb_state_key_get_consumed_mods2(
+      group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB);
+
+  uint32_t mods = raw_mods & ~consumed;
 
   wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
   /* On _press_ if there is no active screen locker,
    * attempt to process a compositor keybinding. */
+
   if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-    for (i = 0; i < nsyms; i++)
+    for (i = 0; i < nsyms; i++) {
       handled = keybinding(mods, syms[i]) || handled;
+    }
   }
 
   if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
@@ -1723,7 +1830,11 @@ int keyrepeat(void *data) {
 
 void killclient(const Arg *arg) {
   Client *sel;
-  applytoselect(selmon, sel, { client_send_close(sel); });
+  applytoselect(selmon, sel, {
+    removeselection(sel);
+    client_send_close(sel);
+  });
+  focusclient(focustop(selmon), 0);
   setvimmode(VIM_MODE_NORMAL);
 }
 
@@ -1817,6 +1928,9 @@ unset_fullscreen:
         (w->tags & c->tags))
       setfullscreen(w, 0);
   }
+
+  /* Enter insert mode when opened a new client */
+  setvimmode(VIM_MODE_INSERT);
 }
 
 void maximizenotify(struct wl_listener *listener, void *data) {
@@ -2111,24 +2225,29 @@ void printstatus(void) {
       if (c->isurgent)
         urg |= c->tags;
     }
-    if ((c = focustop(m))) {
-      printf("%s title %s\n", m->wlr_output->name, client_get_title(c));
-      printf("%s appid %s\n", m->wlr_output->name, client_get_appid(c));
-      printf("%s fullscreen %d\n", m->wlr_output->name, c->isfullscreen);
-      printf("%s floating %d\n", m->wlr_output->name, c->isfloating);
-      sel = c->tags;
-    } else {
+    if (wl_list_empty(&selstack)) {
       printf("%s title \n", m->wlr_output->name);
       printf("%s appid \n", m->wlr_output->name);
       printf("%s fullscreen \n", m->wlr_output->name);
       printf("%s floating \n", m->wlr_output->name);
       sel = 0;
+    } else {
+      applytoselect(m, c, {
+        printf("%s title %s\n", m->wlr_output->name, client_get_title(c));
+        printf("%s appid %s\n", m->wlr_output->name, client_get_appid(c));
+        printf("%s fullscreen %d\n", m->wlr_output->name, c->isfullscreen);
+        printf("%s floating %d\n", m->wlr_output->name, c->isfloating);
+        sel = c->tags;
+      });
     }
 
     printf("%s selmon %u\n", m->wlr_output->name, m == selmon);
     printf("%s tags %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 "\n",
            m->wlr_output->name, occ, m->tagset[m->seltags], sel, urg);
     printf("%s layout %s\n", m->wlr_output->name, m->ltsymbol);
+
+    // vimwl specific data
+    printf("%s vimmode %d\n", m->wlr_output->name, vimmode);
   }
   fflush(stdout);
 }
@@ -2295,7 +2414,8 @@ void setcursor(struct wl_listener *listener, void *data) {
   struct wlr_seat_pointer_request_set_cursor_event *event = data;
   /* If we're "grabbing" the cursor, don't use the client's image, we will
    * restore it after "grabbing" sending a leave event, followed by a enter
-   * event, which will result in the client requesting set the cursor surface */
+   * event, which will result in the client requesting set the cursor surface
+   */
   if (cursor_mode != CurNormal && cursor_mode != CurPressed)
     return;
   /* This can be sent by any client, so we check to make sure this one
@@ -2407,18 +2527,20 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
 }
 
 void setpsel(struct wl_listener *listener, void *data) {
-  /* This event is raised by the seat when a client wants to set the selection,
-   * usually when the user copies something. wlroots allows compositors to
-   * ignore such requests if they so choose, but in dwl we always honor them
+  /* This event is raised by the seat when a client wants to set the
+   * selection, usually when the user copies something. wlroots allows
+   * compositors to ignore such requests if they so choose, but in dwl we
+   * always honor them
    */
   struct wlr_seat_request_set_primary_selection_event *event = data;
   wlr_seat_set_primary_selection(seat, event->source, event->serial);
 }
 
 void setsel(struct wl_listener *listener, void *data) {
-  /* This event is raised by the seat when a client wants to set the selection,
-   * usually when the user copies something. wlroots allows compositors to
-   * ignore such requests if they so choose, but in dwl we always honor them
+  /* This event is raised by the seat when a client wants to set the
+   * selection, usually when the user copies something. wlroots allows
+   * compositors to ignore such requests if they so choose, but in dwl we
+   * always honor them
    */
   struct wlr_seat_request_set_selection_event *event = data;
   wlr_seat_set_selection(seat, event->source, event->serial);
@@ -2489,9 +2611,9 @@ void setup(void) {
   /* This creates some hands-off wlroots interfaces. The compositor is
    * necessary for clients to allocate surfaces and the data device manager
    * handles the clipboard. Each of these wlroots interfaces has room for you
-   * to dig your fingers in and play with their behavior if you want. Note that
-   * the clients cannot set the selection directly without compositor approval,
-   * see the setsel() function. */
+   * to dig your fingers in and play with their behavior if you want. Note
+   * that the clients cannot set the selection directly without compositor
+   * approval, see the setsel() function. */
   compositor = wlr_compositor_create(dpy, 6, drw);
   wlr_subcompositor_create(dpy);
   wlr_data_device_manager_create(dpy);
@@ -2538,6 +2660,9 @@ void setup(void) {
   wl_list_init(&fstack);
 
   wl_list_init(&selstack);
+
+  // Generate the key array from keymaps
+  makekeys();
 
   xdg_shell = wlr_xdg_shell_create(dpy, 6);
   wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
@@ -2680,6 +2805,7 @@ void tag(const Arg *arg) {
   sel->tags = arg->ui & TAGMASK;
   focusclient(focustop(selmon), 1);
   arrange(selmon);
+
   printstatus();
 }
 
@@ -2944,6 +3070,7 @@ void view(const Arg *arg) {
     selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
   focusclient(focustop(selmon), 1);
   arrange(selmon);
+
   printstatus();
 }
 
@@ -3042,24 +3169,271 @@ int setvimmode(const uint8_t mode) {
   if (vimmode == mode)
     return 0;
 
-  Client *c;
-  applytoselect(selmon, c, {
-    if (c != focustop(selmon))
-      removefromselection(c);
-  });
-
   if (mode == VIM_MODE_NORMAL) {
     // Can switch to normal mode from any other mode
     vimmode = mode;
+    wlr_seat_keyboard_clear_focus(seat);
+
+    // Clear selection
+    Client *c;
+    applytoselect(selmon, c, {
+      if (c != focustop(selmon))
+        removeselection(c);
+    });
+
     return 1;
   }
 
   if (vimmode == VIM_MODE_NORMAL) {
     // Can switch to other modes only from normal mode
     vimmode = mode;
+    if (vimmode == VIM_MODE_INSERT) {
+      /* Have a client, so focus its top-level wlr_surface */
+      if (focustop(selmon) == NULL)
+        return 0;
+
+      client_notify_enter(client_surface(focustop(selmon)),
+                          wlr_seat_get_keyboard(seat));
+
+      /* Activate the new client */
+      client_activate_surface(client_surface(focustop(selmon)), 1);
+
+      // Clear selection
+      Client *c;
+      applytoselect(selmon, c, {
+        if (c != focustop(selmon))
+          removeselection(c);
+      });
+
+    } else {
+      // Unfocus all clients, since not in insert mode
+      wlr_seat_keyboard_clear_focus(seat);
+    }
     return 1;
   }
   return 0;
+}
+
+int set_mods(Key *ref, char **str) {
+  int offset = 0;
+
+  regex_t reegex;
+  regcomp(&reegex, ".*C\\-.*", 0);
+  if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
+    ref->mod |= WLR_MODIFIER_CTRL;
+    offset += 2;
+  }
+
+  regcomp(&reegex, ".*S\\-.*", 0);
+  if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
+    ref->mod |= WLR_MODIFIER_SHIFT;
+    offset += 2;
+  }
+
+  regcomp(&reegex, ".*[AM]\\-.*", 0);
+  if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
+    ref->mod |= WLR_MODIFIER_ALT;
+    offset += 2;
+  }
+
+  regcomp(&reegex, ".*D\\-.*", 0);
+  if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
+    ref->mod |= WLR_MODIFIER_LOGO;
+    offset += 2;
+  }
+
+  *str += offset;
+  return offset;
+}
+
+void set_key(Key *ref, char *str) {
+  ref->mod = 0;
+
+  set_mods(ref, &str);
+
+  bool changed = false;
+  uint8_t loops = 0;
+  do {
+    for (KeyAlias *alias = key_aliases; alias < END(key_aliases); alias++) {
+      for (int i = 0; i < alias->size; i++) {
+        if (strcmp(str, alias->aliases[i]) == 0) {
+          str = alias->key;
+          changed = true;
+          set_mods(ref, &str);
+          break;
+        }
+      }
+    }
+    loops++;
+  } while (changed && loops < 50);
+
+  xkb_keysym_t base = xkb_keysym_from_name(str, XKB_KEYSYM_NO_FLAGS);
+  if (base == 0) {
+    // Invalid key
+    char buf[strlen(str) + 3];
+    snprintf(buf, sizeof(buf), "%s_L", str);
+    xkb_keysym_t left = xkb_keysym_from_name(buf, XKB_KEYSYM_NO_FLAGS);
+    snprintf(buf, sizeof(buf), "%s_R", str);
+    xkb_keysym_t right = xkb_keysym_from_name(buf, XKB_KEYSYM_NO_FLAGS);
+    if (left != 0 && right != 0) {
+      // Key has _L and _R versions
+      ref->keysym = left;
+      ref->altkeysym = right;
+      return;
+    }
+    printf("Invalid key: %s (may be part of a longer keybind)\n", str);
+    exit(1);
+    return;
+  }
+
+  if (ref->mod & WLR_MODIFIER_SHIFT) {
+    if (*(str + 1) == '\0') {
+      // Single char key
+      if (xkb_keysym_to_upper(base) != xkb_keysym_to_lower(base)) {
+        // Keysym has a lowercase and uppercase variant
+        base = xkb_keysym_to_upper(base);
+        ref->mod &= ~WLR_MODIFIER_SHIFT;
+      }
+    }
+  }
+
+  ref->keysym = base;
+}
+
+void makekeys() {
+  // Make vim mode keymaps
+  for (int i = 0; i < LENGTH(vimmodekeys); i++) {
+    VimModeKey *map = vimmodekeys + i;
+
+    if (map == NULL)
+      continue;
+
+    char *temp = strdup(map->keysstr);
+
+    Key *head = malloc(sizeof(Key));
+    Key *tail = head;
+
+    char *buf;
+
+    uint32_t mode;
+    if (map->vimmode == VIM_MODE_NORMAL)
+      mode = VIM_MODE_ANY;
+    else
+      mode = VIM_MODE_NORMAL;
+
+    for (int i = 0; temp[i] != '\0'; i++) {
+      switch (*(temp + i)) {
+      case '<':
+        buf = temp + i + 1;
+        break;
+
+      case '>':
+        temp[i] = '\0';
+        tail->vimmode = mode;
+        set_key(tail, buf);
+        buf = NULL;
+        if (temp[i + 1] != '\0') {
+          tail->next.action = NULL;
+          tail->next.key = malloc(sizeof(Key));
+          tail = tail->next.key;
+        }
+        break;
+
+      default:
+        if (buf == NULL) {
+          buf = malloc(sizeof(char) * 2);
+          buf[0] = *(temp + i);
+          buf[1] = '\0';
+          tail->vimmode = mode;
+          set_key(tail, buf);
+          free(buf);
+          buf = NULL;
+          if (temp[i + 1] != '\0') {
+            tail->next.action = NULL;
+            tail->next.key = malloc(sizeof(Key));
+            tail = tail->next.key;
+          }
+          break;
+        }
+      }
+    }
+
+    // Add action at the end of the key chain
+    tail->next.key = NULL;
+    tail->next.action = malloc(sizeof(Action));
+    tail->next.action->setvimmode = map->vimmode;
+    tail->next.action->func = NULL;
+    tail->next.action->start = head;
+
+    free(temp);
+    temp = NULL;
+    keys[i] = head;
+  }
+
+  // Make user keymaps
+  for (int i = 0; i < LENGTH(keymaps); i++) {
+    KeyMap *map = keymaps + i;
+
+    if (map == NULL)
+      continue;
+
+    char *temp = strdup(map->keysstr);
+
+    Key *head = malloc(sizeof(Key));
+    Key *tail = head;
+
+    char *buf;
+
+    for (int i = 0; temp[i] != '\0'; i++) {
+      switch (*(temp + i)) {
+      case '<':
+        buf = temp + i + 1;
+        break;
+
+      case '>':
+        temp[i] = '\0';
+        tail->vimmode = map->vimmode;
+        set_key(tail, buf);
+        buf = NULL;
+        if (temp[i + 1] != '\0') {
+          tail->next.action = NULL;
+          tail->next.key = malloc(sizeof(Key));
+          tail = tail->next.key;
+        }
+        break;
+
+      default:
+        if (buf == NULL) {
+          buf = malloc(sizeof(char) * 2);
+          buf[0] = *(temp + i);
+          buf[1] = '\0';
+          tail->vimmode = map->vimmode;
+          set_key(tail, buf);
+          free(buf);
+          buf = NULL;
+          if (temp[i + 1] != '\0') {
+            tail->next.action = NULL;
+            tail->next.key = malloc(sizeof(Key));
+            tail = tail->next.key;
+          }
+          break;
+        }
+      }
+    }
+
+    // Add action at the end of the key chain
+    tail->next.key = NULL;
+    tail->next.action = malloc(sizeof(Action));
+    tail->next.action->setvimmode = -1;
+    tail->next.action->func = map->func;
+    tail->next.action->arg = map->arg;
+    tail->next.action->start = head;
+
+    free(temp);
+    temp = NULL;
+    // Insert after vim mode keymaps
+    keys[LENGTH(vimmodekeys) + i] = head;
+  }
 }
 
 #ifdef XWAYLAND
@@ -3177,7 +3551,8 @@ int main(int argc, char *argv[]) {
   if (optind < argc)
     goto usage;
 
-  /* Wayland requires XDG_RUNTIME_DIR for creating its communications socket */
+  /* Wayland requires XDG_RUNTIME_DIR for creating its communications socket
+   */
   if (!getenv("XDG_RUNTIME_DIR"))
     die("XDG_RUNTIME_DIR must be set");
   setup();

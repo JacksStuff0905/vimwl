@@ -117,6 +117,11 @@ static const enum libinput_config_tap_button_map button_map =
 // Removed MODKEY for the sake of vim modes
 #define NOMOD 0
 
+#define VIM_LEADER " ";
+
+// Define your <leader> keybinding
+#define LEADER XKB_KEY_space
+
 #define TAGKEYS(KEY, SKEY, TAG)                                                \
   {MODKEY, KEY, view, {.ui = 1 << TAG}},                                       \
       {MODKEY | WLR_MODIFIER_CTRL, KEY, toggleview, {.ui = 1 << TAG}},         \
@@ -136,30 +141,50 @@ static const enum libinput_config_tap_button_map button_map =
 static const char *termcmd[] = {"kitty", NULL};
 static const char *menucmd[] = {"wmenu-run", NULL};
 
+/* Vim-like leader key config - configure it as you wish.
+ * Commonly set to slash ('//') or space (' ') */
+static const char vimleader[] = " ";
+
 static const VimModeKey vimmodekeys[] = {
     // Normal Mode
-    {XKB_KEY_Alt_L, VIM_MODE_NORMAL},
-    {XKB_KEY_Alt_R, VIM_MODE_NORMAL},
+    {"<Alt>", VIM_MODE_NORMAL},
     // Insert Mode
-    {XKB_KEY_i, VIM_MODE_INSERT},
-    {XKB_KEY_I, VIM_MODE_INSERT},
-    {XKB_KEY_a, VIM_MODE_INSERT},
-    {XKB_KEY_A, VIM_MODE_INSERT},
+    {"i", VIM_MODE_INSERT},
+    {"I", VIM_MODE_INSERT},
+    {"a", VIM_MODE_INSERT},
+    {"A", VIM_MODE_INSERT},
     // Visual Mode
-    {XKB_KEY_v, VIM_MODE_VISUAL},
-    {XKB_KEY_V, VIM_MODE_VISUAL},
+    {"v", VIM_MODE_VISUAL},
+    {"V", VIM_MODE_VISUAL},
 };
 
-static const Key keys[] = {
-  /* Note that Shift changes certain key codes: 2 -> at, etc. */
-  /* modifier                  key                  function argument */
-  //{ MODKEY,                    XKB_KEY_p,           spawn, {.v =
-  //menucmd} },
-  {VIM_MODE_NORMAL, NOMOD, XKB_KEY_Return, spawn, {.v = termcmd}},
-  {VIM_MODE_NORMAL|VIM_MODE_VISUAL, NOMOD, XKB_KEY_x, killclient, {0}},
-  {VIM_MODE_NORMAL|VIM_MODE_VISUAL, NOMOD, XKB_KEY_j, focusstack, {.i = +1}},
-  {VIM_MODE_NORMAL|VIM_MODE_VISUAL, NOMOD, XKB_KEY_k, focusstack, {.i = -1}},
-  /*{ MODKEY,                    XKB_KEY_i,           incnmaster,       {.i = +1}
+static const KeyMap keymaps[] = {
+    /* Note that Shift changes certain key codes: 2 -> at, etc. */
+    /* modifier                  key                  function argument */
+    //{ MODKEY,                    XKB_KEY_p,           spawn, {.v =
+    // menucmd} },
+    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<leader>b", spawn, {.v = termcmd}},
+
+    // Kill client
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "x", killclient, {0}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "d", killclient, {0}},
+
+    {VIM_MODE_NORMAL, "$", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<S-o>", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "!", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "T", spawn, {.v = termcmd}},
+
+    // Quit
+    {VIM_MODE_NORMAL, "<D-Esc>", quit, {0}},
+
+    // Navigation
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusstack, {.i = -1}},
+
+// Quit
+//{VIM_MODE_NORMAL, WLR_MODIFIER_SHIFT, XKB_KEY_q, quit, {0}},
+/*{ MODKEY,                    XKB_KEY_i,           incnmaster,       {.i = +1}
 }, { MODKEY,                    XKB_KEY_d,           incnmaster,       {.i = -1}
 }, { MODKEY,                    XKB_KEY_h,           setmfact,         {.f =
 -0.05f} }, { MODKEY,                    XKB_KEY_l,           setmfact, {.f =
@@ -197,23 +222,20 @@ XKB_KEY_q,           quit,             {0} },*/
  */
 #define CHVT(n)                                                                \
   {                                                                            \
-    VIM_MODE_ANY, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_XF86Switch_VT_##n,   \
-        chvt, {                                                                \
-      .ui = (n)                                                                \
-    }                                                                          \
+    VIM_MODE_ANY, "<C-A-F" #n ">", chvt, { .ui = (n) }                         \
   }
-        CHVT(1),
-        CHVT(2),
-        CHVT(3),
-        CHVT(4),
-        CHVT(5),
-        CHVT(6),
-        CHVT(7),
-        CHVT(8),
-        CHVT(9),
-        CHVT(10),
-        CHVT(11),
-        CHVT(12),
+    CHVT(1),
+    CHVT(2),
+    CHVT(3),
+    CHVT(4),
+    CHVT(5),
+    CHVT(6),
+    CHVT(7),
+    CHVT(8),
+    CHVT(9),
+    CHVT(10),
+    CHVT(11),
+    CHVT(12),
 };
 
 static const Button buttons[] = {

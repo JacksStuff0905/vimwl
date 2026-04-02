@@ -100,8 +100,8 @@ client_activate_surface(struct wlr_surface *s, int activated)
 		return;
 	}
 #endif
-	if ((toplevel = wlr_xdg_toplevel_try_from_wlr_surface(s)))
-		wlr_xdg_toplevel_set_activated(toplevel, activated);
+	/*if ((toplevel = wlr_xdg_toplevel_try_from_wlr_surface(s)))
+		wlr_xdg_toplevel_set_activated(toplevel, activated);*/
 }
 
 static inline uint32_t
@@ -291,6 +291,7 @@ client_is_unmanaged(Client *c)
 static inline void
 client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
 {
+  printf("Notify enter\n");
 	if (kb)
 		wlr_seat_keyboard_notify_enter(seat, s, kb->keycodes,
 				kb->num_keycodes, &kb->modifiers);
