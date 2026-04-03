@@ -141,6 +141,7 @@ static const int key_timeout = 1000;
 /* commands */
 static const char *termcmd[] = {"kitty", NULL};
 static const char *menucmd[] = {"wmenu-run", NULL};
+static const char *webbrowsercmd[] = {"firefox", NULL};
 
 /* Vim-like leader key config - configure it as you wish.
  * Commonly set to slash ('//') or space (' ') */
@@ -166,10 +167,14 @@ static const KeyMap keymaps[] = {
     // menucmd} },
     {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<leader>b", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<leader>ba", spawn, {.v = termcmd}},
 
     // Kill client
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "x", killclient, {0}},
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "d", killclient, {0}},
+
+    // Apps
+    {VIM_MODE_NORMAL, "<leader>wb", spawn, {.v = webbrowsercmd}},
 
     {VIM_MODE_NORMAL, "$", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<S-o>", spawn, {.v = termcmd}},
@@ -181,7 +186,7 @@ static const KeyMap keymaps[] = {
     {VIM_MODE_NORMAL, "<C-A-T>", killclient, {0}},
 
     // Quit
-    {VIM_MODE_NORMAL, "<D-Esc>", quit, {0}},
+    {VIM_MODE_NORMAL, "<D-S-Esc>", quit, {0}},
 
     // Navigation
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},

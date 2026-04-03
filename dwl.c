@@ -192,7 +192,7 @@ typedef struct {
     Arg arg;
     uint8_t setvimmode;
   };
-  Key *start;
+  bool queued;
 } Action;
 
 struct Key {
@@ -204,6 +204,7 @@ struct Key {
     Key *key;
     Action *action;
   } next;
+  Key *start;
 };
 
 typedef struct {
@@ -374,6 +375,8 @@ static void gpureset(struct wl_listener *listener, void *data);
 static void handlesig(int signo);
 static void incnmaster(const Arg *arg);
 static void inputdevice(struct wl_listener *listener, void *data);
+static int check_key_buffer_timeout(void *data);
+static void apply_queued_actions(bool force);
 static int keybinding(uint32_t mods, xkb_keysym_t sym);
 static void keypress(struct wl_listener *listener, void *data);
 static void keypressmod(struct wl_listener *listener, void *data);
@@ -455,6 +458,8 @@ static struct wlr_scene_tree *drag_icon;
 static uint8_t vimmode = VIM_MODE_NORMAL;
 static char key_buffer[100] = "";
 static double last_key_time = 0;
+static struct wl_event_source *key_buffer_timout_timer;
+static bool apply_actions = false;
 
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
 static const int layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
@@ -1691,6 +1696,50 @@ void inputdevice(struct wl_listener *listener, void *data) {
   wlr_seat_set_capabilities(seat, caps);
 }
 
+int check_key_buffer_timeout(void *data) {
+  if (apply_actions || strlen(key_buffer) > 0) {
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
+
+    if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
+      apply_queued_actions(false);
+    }
+  }
+
+  wl_event_source_timer_update(key_buffer_timout_timer, 10); // Run every 10ms
+  return 0;
+}
+
+void apply_queued_actions(bool force) {
+  // Clear the key_buffer
+  key_buffer[0] = '\0';
+
+  Key **k;
+  if (apply_actions || force) {
+    apply_actions = false;
+
+    for (k = &(keys[0]); k < END(keys); k++) {
+      if ((*k)->next.action && (*k)->next.action->queued) {
+        if ((*k)->next.action->func) {
+          (*k)->next.action->func(&((*k)->next.action->arg));
+        } else if ((*k)->next.action->setvimmode != -1) {
+          setvimmode((*k)->next.action->setvimmode);
+        }
+      }
+    }
+
+    for (k = &(keys[0]); k < END(keys); k++) {
+      // Reset the key
+      if ((*k)->next.action)
+        (*k)->next.action->queued = false;
+      *k = (*k)->start;
+    }
+  }
+
+  printstatus();
+}
+
 int keybinding(uint32_t mods, xkb_keysym_t sym) {
   /*
    * Here we handle compositor keybindings. This is when the compositor is
@@ -1702,45 +1751,61 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
   clock_gettime(CLOCK_MONOTONIC, &time);
   double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
 
+  bool fresh = true;
+
   Key **k;
   if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
-    // Clear the key_buffer
     key_buffer[0] = '\0';
-    printstatus();
-
     for (k = &(keys[0]); k < END(keys); k++) {
       // Reset the key
-      while ((*k)->next.key)
-        *k = (*k)->next.key;
-      *k = (*k)->next.action->start;
+      if ((*k)->next.action)
+        (*k)->next.action->queued = false;
+      *k = (*k)->start;
+    }
+    fresh = true;
+  } else {
+    for (k = &(keys[0]); k < END(keys); k++) {
+      fresh &= (*k == (*k)->start);
     }
   }
+
+  int action_count = 0;
+  int res = 0;
 
   for (k = &(keys[0]); k < END(keys); k++) {
     if (vimmode & ((*k)->vimmode) && CLEANMASK(mods) == CLEANMASK((*k)->mod) &&
         (sym == (*k)->keysym || sym == (*k)->altkeysym)) {
       if ((*k)->next.action) {
-        if ((*k)->next.action->func) {
-          // Key chain finished -> process action
-          (*k)->next.action->func(&((*k)->next.action->arg));
-          *k = (*k)->next.action->start;
-
-          // Clear the key_buffer
-          key_buffer[0] = '\0';
-          printstatus();
-        } else if ((*k)->next.action->setvimmode != -1) {
-          setvimmode((*k)->next.action->setvimmode);
+        // Queue action
+        if (*k != (*k)->start || !(*k)->next.action || fresh) {
+          (*k)->next.action->queued = true;
+          action_count++;
+          apply_actions = true;
         }
       } else if ((*k)->next.key) {
         // Key chain not finished -> continue it
         *k = (*k)->next.key;
+        action_count++;
       }
 
-      last_key_time = time_sec;
-      return 1;
+      res = 1;
+    } else {
+      if ((*k)->next.action) {
+        (*k)->next.action->queued = false;
+      }
+      *k = (*k)->start;
     }
   }
-  return 0;
+
+  if (action_count > 0)
+    last_key_time = time_sec;
+
+  if (action_count <= 1) {
+    // If there are no conflicts
+    apply_queued_actions(true);
+  }
+
+  return res;
 }
 
 void keypress(struct wl_listener *listener, void *data) {
@@ -1761,7 +1826,8 @@ void keypress(struct wl_listener *listener, void *data) {
   uint32_t raw_mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
 
   /* xkb_mod_mask_t consumed = xkb_state_key_get_consumed_mods2(
-      group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB); */
+      group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB);
+   */
 
   uint32_t mods = raw_mods;
 
@@ -2014,7 +2080,8 @@ void motionabsolute(struct wl_listener *listener, void *data) {
    * motion event, from 0..1 on each axis. This happens, for example, when
    * wlroots is running under a Wayland window rather than KMS+DRM, and you
    * move the mouse over the window. You could enter the window from any edge,
-   * so we have to warp the mouse there. Also, some hardware emits these events.
+   * so we have to warp the mouse there. Also, some hardware emits these
+   * events.
    */
   struct wlr_pointer_motion_absolute_event *event = data;
   double lx, ly, dx, dy;
@@ -2803,6 +2870,11 @@ void setup(void) {
   wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
   wl_signal_add(&output_mgr->events.test, &output_mgr_test);
 
+  /* Setup the key buffer timeout checker */
+  key_buffer_timout_timer =
+      wl_event_loop_add_timer(event_loop, check_key_buffer_timeout, NULL);
+  wl_event_source_timer_update(key_buffer_timout_timer, 10); // 10ms interval
+
   /* Make sure XWayland clients don't connect to the parent X server,
    * e.g when running in the x11 backend or the wayland backend and the
    * compositor has Xwayland support */
@@ -3345,75 +3417,6 @@ void set_key(Key *ref, char *str) {
 }
 
 void makekeys() {
-  // Make vim mode keymaps
-  for (int i = 0; i < LENGTH(vimmodekeys); i++) {
-    VimModeKey *map = vimmodekeys + i;
-
-    if (map == NULL)
-      continue;
-
-    char *temp = strdup(map->keysstr);
-
-    Key *head = malloc(sizeof(Key));
-    Key *tail = head;
-
-    char *buf;
-
-    uint32_t mode;
-    if (map->vimmode == VIM_MODE_NORMAL)
-      mode = VIM_MODE_ANY;
-    else
-      mode = VIM_MODE_NORMAL;
-
-    for (int i = 0; temp[i] != '\0'; i++) {
-      switch (*(temp + i)) {
-      case '<':
-        buf = temp + i + 1;
-        break;
-
-      case '>':
-        temp[i] = '\0';
-        tail->vimmode = mode;
-        set_key(tail, buf);
-        buf = NULL;
-        if (temp[i + 1] != '\0') {
-          tail->next.action = NULL;
-          tail->next.key = malloc(sizeof(Key));
-          tail = tail->next.key;
-        }
-        break;
-
-      default:
-        if (buf == NULL) {
-          buf = malloc(sizeof(char) * 2);
-          buf[0] = *(temp + i);
-          buf[1] = '\0';
-          tail->vimmode = mode;
-          set_key(tail, buf);
-          free(buf);
-          buf = NULL;
-          if (temp[i + 1] != '\0') {
-            tail->next.action = NULL;
-            tail->next.key = malloc(sizeof(Key));
-            tail = tail->next.key;
-          }
-          break;
-        }
-      }
-    }
-
-    // Add action at the end of the key chain
-    tail->next.key = NULL;
-    tail->next.action = malloc(sizeof(Action));
-    tail->next.action->setvimmode = map->vimmode;
-    tail->next.action->func = NULL;
-    tail->next.action->start = head;
-
-    free(temp);
-    temp = NULL;
-    keys[i] = head;
-  }
-
   // Make user keymaps
   for (int i = 0; i < LENGTH(keymaps); i++) {
     KeyMap *map = keymaps + i;
@@ -3429,6 +3432,7 @@ void makekeys() {
     char *buf;
 
     for (int i = 0; temp[i] != '\0'; i++) {
+      tail->start = head;
       switch (*(temp + i)) {
       case '<':
         buf = temp + i + 1;
@@ -3471,12 +3475,80 @@ void makekeys() {
     tail->next.action->setvimmode = -1;
     tail->next.action->func = map->func;
     tail->next.action->arg = map->arg;
-    tail->next.action->start = head;
 
     free(temp);
     temp = NULL;
     // Insert after vim mode keymaps
-    keys[LENGTH(vimmodekeys) + i] = head;
+    keys[i] = head;
+  }
+
+  // Make vim mode keymaps
+  for (int i = 0; i < LENGTH(vimmodekeys); i++) {
+    VimModeKey *map = vimmodekeys + i;
+
+    if (map == NULL)
+      continue;
+
+    char *temp = strdup(map->keysstr);
+
+    Key *head = malloc(sizeof(Key));
+    Key *tail = head;
+
+    char *buf;
+
+    uint32_t mode;
+    if (map->vimmode == VIM_MODE_NORMAL)
+      mode = VIM_MODE_ANY;
+    else
+      mode = VIM_MODE_NORMAL;
+
+    for (int i = 0; temp[i] != '\0'; i++) {
+      tail->start = head;
+      switch (*(temp + i)) {
+      case '<':
+        buf = temp + i + 1;
+        break;
+
+      case '>':
+        temp[i] = '\0';
+        tail->vimmode = mode;
+        set_key(tail, buf);
+        buf = NULL;
+        if (temp[i + 1] != '\0') {
+          tail->next.action = NULL;
+          tail->next.key = malloc(sizeof(Key));
+          tail = tail->next.key;
+        }
+        break;
+
+      default:
+        if (buf == NULL) {
+          buf = malloc(sizeof(char) * 2);
+          buf[0] = *(temp + i);
+          buf[1] = '\0';
+          tail->vimmode = mode;
+          set_key(tail, buf);
+          free(buf);
+          buf = NULL;
+          if (temp[i + 1] != '\0') {
+            tail->next.action = NULL;
+            tail->next.key = malloc(sizeof(Key));
+            tail = tail->next.key;
+          }
+          break;
+        }
+      }
+    }
+
+    // Add action at the end of the key chain
+    tail->next.key = NULL;
+    tail->next.action = malloc(sizeof(Action));
+    tail->next.action->setvimmode = map->vimmode;
+    tail->next.action->func = NULL;
+
+    free(temp);
+    temp = NULL;
+    keys[LENGTH(keymaps) + i] = head;
   }
 }
 
