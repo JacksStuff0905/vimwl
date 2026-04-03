@@ -8,6 +8,7 @@
 #include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,8 +208,7 @@ struct Key {
 
 typedef struct {
   const char *key;
-  const int size;
-  const char **aliases;
+  const char *alias;
 } KeyAlias;
 
 typedef struct {
@@ -453,6 +453,7 @@ static struct wlr_scene *scene;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
 static uint8_t vimmode = VIM_MODE_NORMAL;
+static char key_buffer[100] = "";
 static double last_key_time = 0;
 
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
@@ -553,47 +554,24 @@ static struct wlr_xwayland *xwayland;
 static Key *keys[LENGTH(keymaps) + LENGTH(vimmodekeys)];
 
 const KeyAlias key_aliases[] = {
-    {vimleader, 1, (const char *[]){"leader"}},
+    {vimleader, "leader"},
 
-    {"space", 1, (const char *[]){" "}},
+    {"space", " "},
 
-    {"Return", 2, (const char *[]){"CR", "Enter"}},
-    {"Delete", 1, (const char *[]){"Del"}},
-    {"Insert", 1, (const char *[]){"Ins"}},
-    {"Escape", 1, (const char *[]){"Esc"}},
+    {"Return", "CR"},      {"Return", "Enter"},  {"BackSpace", "BS"},
+    {"Delete", "Del"},     {"Insert", "Ins"},    {"Escape", "Esc"},
 
-    {"exclam", 1, (const char *[]){"!"}},
-    {"at", 1, (const char *[]){"@"}},
-    {"numbersign", 1, (const char *[]){"#"}},
-    {"dollar", 1, (const char *[]){"$"}},
-    {"percent", 1, (const char *[]){"%"}},
-    {"asciicircum", 1, (const char *[]){"^"}},
-    {"ampersand", 1, (const char *[]){"&"}},
-    {"asterisk", 1, (const char *[]){"*"}},
-    {"parenleft", 1, (const char *[]){"("}},
-    {"parenright", 1, (const char *[]){")"}},
-    {"minus", 1, (const char *[]){"-"}},
-    {"plus", 1, (const char *[]){"+"}},
-    {"equal", 1, (const char *[]){"="}},
-    {"bracketleft", 1, (const char *[]){"["}},
-    {"bracketright", 1, (const char *[]){"]"}},
-    {"braceleft", 1, (const char *[]){"{"}},
-    {"braceright", 1, (const char *[]){"}"}},
-    {"backslash", 1, (const char *[]){"\\"}},
-    {"bar", 1, (const char *[]){"|"}},
-    {"semicolon", 1, (const char *[]){";"}},
-    {"apostrophe", 1, (const char *[]){"'"}},
-    {"comma", 1, (const char *[]){","}},
-    {"period", 1, (const char *[]){"."}},
-    {"slash", 1, (const char *[]){"/"}},
-    {"asciitilde", 1, (const char *[]){"~"}},
-    {"grave", 1, (const char *[]){"`"}},
-    {"less", 1, (const char *[]){"<"}},
-    {"greater", 1, (const char *[]){">"}},
-    {"quotedbl", 1, (const char *[]){"\""}},
-    {"colon", 1, (const char *[]){":"}},
-    {"question", 1, (const char *[]){"?"}},
-    {"underscore", 1, (const char *[]){"_"}},
+    {"exclam", "!"},       {"at", "@"},          {"numbersign", "#"},
+    {"dollar", "$"},       {"percent", "%"},     {"asciicircum", "^"},
+    {"ampersand", "&"},    {"asterisk", "*"},    {"parenleft", "("},
+    {"parenright", ")"},   {"minus", "-"},       {"plus", "+"},
+    {"equal", "="},        {"bracketleft", "["}, {"bracketright", "]"},
+    {"braceleft", "{"},    {"braceright", "}"},  {"backslash", "Bslash"},
+    {"bar", "Bar"},        {"semicolon", ";"},   {"apostrophe", "'"},
+    {"comma", ","},        {"period", "."},      {"slash", "/"},
+    {"asciitilde", "~"},   {"grave", "`"},       {"less", "lt"},
+    {"greater", "gt"},     {"quotedbl", "\""},   {"colon", ":"},
+    {"question", "?"},     {"underscore", "_"},
 };
 
 /* attempt to encapsulate suck into one file */
@@ -1725,8 +1703,11 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
   double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
 
   Key **k;
-
   if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
+    // Clear the key_buffer
+    key_buffer[0] = '\0';
+    printstatus();
+
     for (k = &(keys[0]); k < END(keys); k++) {
       // Reset the key
       while ((*k)->next.key)
@@ -1743,6 +1724,10 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
           // Key chain finished -> process action
           (*k)->next.action->func(&((*k)->next.action->arg));
           *k = (*k)->next.action->start;
+
+          // Clear the key_buffer
+          key_buffer[0] = '\0';
+          printstatus();
         } else if ((*k)->next.action->setvimmode != -1) {
           setvimmode((*k)->next.action->setvimmode);
         }
@@ -1812,7 +1797,30 @@ void keypress(struct wl_listener *listener, void *data) {
       } else
         curr_sym = syms[i];
 
-      handled = keybinding(mods, curr_sym) || handled;
+      handled = keybinding(mods, curr_sym);
+      if (handled) {
+        char utf8[8];
+        int count = xkb_keysym_to_utf8(curr_sym, utf8, sizeof(utf8));
+        if (count == 2 && utf8[0] >= '!' && utf8[0] <= '~') {
+          // Pretty-printable codes
+          int i = 0;
+          for (; *(key_buffer + i) != '\0'; i++)
+            ;
+          *(key_buffer + i) = utf8[0];
+          *(key_buffer + i + 1) = '\0';
+        } else {
+          // Fallback to ascii / utf code
+          for (int i = 0; i < count - 1; i++) {
+            char tmp[4];
+            sprintf(tmp, "%02x", (unsigned char)utf8[i]);
+            strcat(key_buffer, "<");
+            strcat(key_buffer, tmp);
+            strcat(key_buffer, ">");
+          }
+        }
+        printstatus();
+        break;
+      }
     }
   }
 
@@ -1827,8 +1835,9 @@ void keypress(struct wl_listener *listener, void *data) {
     wl_event_source_timer_update(group->key_repeat_source, 0);
   }
 
-  if (handled)
+  if (handled) {
     return;
+  }
 
   wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 
@@ -2283,6 +2292,7 @@ void printstatus(void) {
 
     // vimwl specific data
     printf("%s vimmode %d\n", m->wlr_output->name, vimmode);
+    printf("%s buffer %s\n", m->wlr_output->name, key_buffer);
   }
   fflush(stdout);
 }
@@ -3291,13 +3301,11 @@ void set_key(Key *ref, char *str) {
   uint8_t loops = 0;
   do {
     for (KeyAlias *alias = key_aliases; alias < END(key_aliases); alias++) {
-      for (int i = 0; i < alias->size; i++) {
-        if (strcmp(str, alias->aliases[i]) == 0) {
-          str = alias->key;
-          changed = true;
-          set_mods(ref, &str);
-          break;
-        }
+      if (strcmp(str, alias->alias) == 0) {
+        str = alias->key;
+        changed = true;
+        set_mods(ref, &str);
+        break;
       }
     }
     loops++;
