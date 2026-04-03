@@ -453,6 +453,7 @@ static struct wlr_scene *scene;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
 static uint8_t vimmode = VIM_MODE_NORMAL;
+static double last_key_time = 0;
 
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
 static const int layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
@@ -1719,12 +1720,22 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
    * processing.
    */
 
-  char symname[64];
-  xkb_keysym_get_name(sym, symname, sizeof(symname));
+  struct timespec time;
+  clock_gettime(CLOCK_MONOTONIC, &time);
+  double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
 
   Key **k;
+
+  if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
+    for (k = &(keys[0]); k < END(keys); k++) {
+      // Reset the key
+      while ((*k)->next.key)
+        *k = (*k)->next.key;
+      *k = (*k)->next.action->start;
+    }
+  }
+
   for (k = &(keys[0]); k < END(keys); k++) {
-    xkb_keysym_get_name((*k)->keysym, symname, sizeof(symname));
     if (vimmode & ((*k)->vimmode) && CLEANMASK(mods) == CLEANMASK((*k)->mod) &&
         (sym == (*k)->keysym || sym == (*k)->altkeysym)) {
       if ((*k)->next.action) {
@@ -1739,6 +1750,8 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
         // Key chain not finished -> continue it
         *k = (*k)->next.key;
       }
+
+      last_key_time = time_sec;
       return 1;
     }
   }
@@ -1762,10 +1775,10 @@ void keypress(struct wl_listener *listener, void *data) {
 
   uint32_t raw_mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
 
-  xkb_mod_mask_t consumed = xkb_state_key_get_consumed_mods2(
-      group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB);
+  /* xkb_mod_mask_t consumed = xkb_state_key_get_consumed_mods2(
+      group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB); */
 
-  uint32_t mods = raw_mods & ~consumed;
+  uint32_t mods = raw_mods;
 
   wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
@@ -1774,7 +1787,32 @@ void keypress(struct wl_listener *listener, void *data) {
 
   if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     for (i = 0; i < nsyms; i++) {
-      handled = keybinding(mods, syms[i]) || handled;
+      const xkb_keysym_t *sym;
+      xkb_layout_index_t layout = xkb_state_key_get_layout(
+          group->wlr_group->keyboard.xkb_state, keycode);
+      int n = xkb_keymap_key_get_syms_by_level(
+          *(&group->wlr_group->keyboard.keymap), keycode, layout, 0, &sym);
+
+      xkb_keysym_t curr_sym;
+
+      if (mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && (n > 0)) {
+        if ((mods & WLR_MODIFIER_SHIFT) &&
+            xkb_keysym_to_upper(*sym) != xkb_keysym_to_lower(*sym)) {
+          // Keysym has a lowercase and uppercase variant
+          curr_sym = xkb_keysym_to_upper(*sym);
+          mods &= ~WLR_MODIFIER_SHIFT;
+        } else
+          curr_sym = *sym;
+
+      } else if ((mods & WLR_MODIFIER_SHIFT) &&
+                 xkb_keysym_to_upper(syms[i]) != xkb_keysym_to_lower(syms[i])) {
+        // Keysym has a lowercase and uppercase variant
+        curr_sym = xkb_keysym_to_upper(syms[i]);
+        mods &= ~WLR_MODIFIER_SHIFT;
+      } else
+        curr_sym = syms[i];
+
+      handled = keybinding(mods, curr_sym) || handled;
     }
   }
 
@@ -1928,9 +1966,6 @@ unset_fullscreen:
         (w->tags & c->tags))
       setfullscreen(w, 0);
   }
-
-  /* Enter insert mode when opened a new client */
-  setvimmode(VIM_MODE_INSERT);
 }
 
 void maximizenotify(struct wl_listener *listener, void *data) {
@@ -3169,6 +3204,8 @@ int setvimmode(const uint8_t mode) {
   if (vimmode == mode)
     return 0;
 
+  Client *focus = focustop(selmon);
+
   if (mode == VIM_MODE_NORMAL) {
     // Can switch to normal mode from any other mode
     vimmode = mode;
@@ -3177,7 +3214,7 @@ int setvimmode(const uint8_t mode) {
     // Clear selection
     Client *c;
     applytoselect(selmon, c, {
-      if (c != focustop(selmon))
+      if (c != focus)
         removeselection(c);
     });
 
@@ -3189,19 +3226,18 @@ int setvimmode(const uint8_t mode) {
     vimmode = mode;
     if (vimmode == VIM_MODE_INSERT) {
       /* Have a client, so focus its top-level wlr_surface */
-      if (focustop(selmon) == NULL)
+      if (focus == NULL)
         return 0;
 
-      client_notify_enter(client_surface(focustop(selmon)),
-                          wlr_seat_get_keyboard(seat));
+      client_notify_enter(client_surface(focus), wlr_seat_get_keyboard(seat));
 
       /* Activate the new client */
-      client_activate_surface(client_surface(focustop(selmon)), 1);
+      client_activate_surface(client_surface(focus), 1);
 
       // Clear selection
       Client *c;
       applytoselect(selmon, c, {
-        if (c != focustop(selmon))
+        if (c != focus)
           removeselection(c);
       });
 

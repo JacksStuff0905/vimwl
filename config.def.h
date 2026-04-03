@@ -114,10 +114,11 @@ LIBINPUT_CONFIG_TAP_MAP_LMR -- 1/2/3 finger tap maps to left/middle/right
 static const enum libinput_config_tap_button_map button_map =
     LIBINPUT_CONFIG_TAP_MAP_LRM;
 
+// The keybind timeout, in milliseconds (1000ms -> 1s)
+static const int key_timeout = 1000;
+
 // Removed MODKEY for the sake of vim modes
 #define NOMOD 0
-
-#define VIM_LEADER " ";
 
 // Define your <leader> keybinding
 #define LEADER XKB_KEY_space
@@ -174,6 +175,10 @@ static const KeyMap keymaps[] = {
     {VIM_MODE_NORMAL, "<S-o>", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "!", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "T", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<C-t>", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<C-S-t>", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<C-A-t>", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<C-A-T>", killclient, {0}},
 
     // Quit
     {VIM_MODE_NORMAL, "<D-Esc>", quit, {0}},
