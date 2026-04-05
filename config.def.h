@@ -5,6 +5,7 @@
    ((hex >> 8) & 0xFF) / 255.0f, (hex & 0xFF) / 255.0f}
 /* appearance */
 static const int sloppyfocus = 1; /* focus follows mouse */
+static const int mousefocus = 1; /* mouse follows focus (when switching between clients, like hyprland) */
 static const int bypass_surface_visibility =
     0; /* 1 means idle inhibitors will disable idle tracking even if it's
           surface isn't visible  */
@@ -246,10 +247,8 @@ XKB_KEY_q,           quit,             {0} },*/
     CHVT(10),
     CHVT(11),
     CHVT(12),
-};
 
-static const Button buttons[] = {
-    {VIM_MODE_NORMAL, NOMOD, BTN_LEFT, moveresize, {.ui = CurMove}},
-    {VIM_MODE_NORMAL, NOMOD, BTN_MIDDLE, togglefloating, {0}},
-    {VIM_MODE_NORMAL, NOMOD, BTN_RIGHT, moveresize, {.ui = CurResize}},
+    {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
+    {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
+    {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
 };

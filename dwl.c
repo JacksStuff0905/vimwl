@@ -104,8 +104,15 @@
   }
 
 /* enums */
-enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
-enum { XDGShell, LayerShell, X11 };                 /* client types */
+enum {
+  CurNone,
+  CurClick,
+  CurRelease,
+  CurDrag,
+  CurHold,
+}; /* cursor */
+enum { GrabNone, GrabMove, GrabResize, GrabWait }; /* grab modes */
+enum { XDGShell, LayerShell, X11 };                /* client types */
 enum {
   LyrBg,
   LyrBottom,
@@ -198,8 +205,14 @@ typedef struct {
 struct Key {
   uint32_t vimmode;
   uint32_t mod;
-  xkb_keysym_t keysym;
-  xkb_keysym_t altkeysym;
+  struct {
+    xkb_keysym_t a;
+    xkb_keysym_t b;
+  } keysym;
+  struct {
+    uint16_t code;
+    uint8_t mode;
+  } mousebtn;
   struct {
     Key *key;
     Action *action;
@@ -211,6 +224,11 @@ typedef struct {
   const char *key;
   const char *alias;
 } KeyAlias;
+
+typedef struct {
+  const uint16_t btn;
+  const char *alias;
+} MouseAlias;
 
 typedef struct {
   uint32_t vimmode;
@@ -365,7 +383,7 @@ static void destroypointerconstraint(struct wl_listener *listener, void *data);
 static void destroysessionlock(struct wl_listener *listener, void *data);
 static void destroykeyboardgroup(struct wl_listener *listener, void *data);
 static Monitor *dirtomon(enum wlr_direction dir);
-static void focusclient(Client *c, int lift);
+static void focusclient(Client *c, int lift, int focus_mouse);
 static void removeselection(Client *c);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
@@ -458,7 +476,7 @@ static struct wlr_scene_tree *drag_icon;
 static uint8_t vimmode = VIM_MODE_NORMAL;
 static char key_buffer[100] = "";
 static double last_key_time = 0;
-static struct wl_event_source *key_buffer_timout_timer;
+static struct wl_event_source *key_buffer_timeout_timer;
 static bool apply_actions = false;
 
 /* Map from ZWLR_LAYER_SHELL_* constants to Lyr* enum */
@@ -497,9 +515,10 @@ static struct wlr_session_lock_v1 *cur_lock;
 
 static struct wlr_seat *seat;
 static KeyboardGroup *kb_group;
-static unsigned int cursor_mode;
+static uint8_t cursor_buttons[17]; /* 16 button codes + 1 always zero */
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
+static uint8_t grab_mode;
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -577,6 +596,23 @@ const KeyAlias key_aliases[] = {
     {"asciitilde", "~"},   {"grave", "`"},       {"less", "lt"},
     {"greater", "gt"},     {"quotedbl", "\""},   {"colon", ":"},
     {"question", "?"},     {"underscore", "_"},
+};
+
+const MouseAlias mouse_aliases[] = {
+    {BTN_LEFT, "Left"},
+    {BTN_MIDDLE, "Middle"},
+    {BTN_RIGHT, "Right"},
+
+    // Extra buttons
+    {BTN_1, "X1"},
+    {BTN_2, "X2"},
+    {BTN_3, "X3"},
+    {BTN_4, "X4"},
+    {BTN_5, "X5"},
+    {BTN_6, "X6"},
+    {BTN_7, "X7"},
+    {BTN_8, "X8"},
+    {BTN_9, "X9"},
 };
 
 /* attempt to encapsulate suck into one file */
@@ -715,7 +751,7 @@ void arrangelayers(Monitor *m) {
           !l->mapped)
         continue;
       /* Deactivate the focused client. */
-      focusclient(NULL, 0);
+      focusclient(NULL, 0, 0);
       exclusive_focus = l;
       client_notify_enter(l->layer_surface->surface,
                           wlr_seat_get_keyboard(seat));
@@ -746,9 +782,17 @@ void buttonpress(struct wl_listener *listener, void *data) {
 
   wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
+  keyboard = wlr_seat_get_keyboard(seat);
+  mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
+
   switch (event->state) {
   case WL_POINTER_BUTTON_STATE_PRESSED:
-    cursor_mode = CurPressed;
+    // Check if the button code is a real button
+    if (event->button < BTN_MOUSE || event->button >= BTN_MOUSE + 16)
+      return;
+
+    cursor_buttons[event->button - BTN_MOUSE + 1] = CurClick;
+
     selmon = xytomon(cursor->x, cursor->y);
     if (locked)
       break;
@@ -756,31 +800,55 @@ void buttonpress(struct wl_listener *listener, void *data) {
     /* Change focus if the button was _pressed_ over a client */
     xytonode(cursor->x, cursor->y, NULL, &c, NULL, NULL, NULL);
     if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
-      focusclient(c, 1);
+      focusclient(c, 1, 0);
 
-    keyboard = wlr_seat_get_keyboard(seat);
-    mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
-    for (b = buttons; b < END(buttons); b++) {
+    bool handled = keybinding(mods, 0);
+
+    cursor_buttons[event->button - BTN_MOUSE + 1] = CurHold;
+
+    if (handled)
+      return;
+    /*for (b = buttons; b < END(buttons); b++) {
       if (vimmode & b->vimmode && CLEANMASK(mods) == CLEANMASK(b->mod) &&
           event->button == b->button && b->func) {
         b->func(&b->arg);
         return;
       }
-    }
+    }*/
     break;
   case WL_POINTER_BUTTON_STATE_RELEASED:
     /* If you released any buttons, we exit interactive move/resize mode. */
     /* TODO: should reset to the pointer focus's current setcursor */
-    if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
+
+    // Check if the button code is a real button
+    if (event->button < BTN_MOUSE || event->button >= BTN_MOUSE + 16)
+      return;
+
+    handled = false;
+
+    cursor_buttons[event->button - BTN_MOUSE + 1] = CurRelease;
+
+    grab_mode = GrabWait;
+
+    keybinding(mods, 0);
+
+    if (!locked && (grab_mode == GrabWait) && grabc) {
       wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
-      cursor_mode = CurNormal;
+      grab_mode = GrabNone;
+
       /* Drop the window off on its new monitor */
       selmon = xytomon(cursor->x, cursor->y);
       setmon(grabc, selmon, 0);
+      if (!client_is_unmanaged(grabc) || client_wants_focus(grabc))
+        focusclient(grabc, 1, 0);
       grabc = NULL;
-      return;
+      handled = true;
     }
-    cursor_mode = CurNormal;
+
+    cursor_buttons[event->button - BTN_MOUSE + 1] = CurNone;
+
+    if (handled)
+      return;
     break;
   }
   /* If the event wasn't handled by the compositor, notify the client with
@@ -923,7 +991,7 @@ void closemon(Monitor *m) {
     if (c->mon == m)
       setmon(c, selmon, c->tags);
   }
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 1);
   printstatus();
 }
 
@@ -1345,7 +1413,7 @@ void destroydecoration(struct wl_listener *listener, void *data) {
 
 void destroydragicon(struct wl_listener *listener, void *data) {
   /* Focus enter isn't sent during drag, so refocus the focused node. */
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
   motionnotify(0, NULL, 0, 0, 0, 0);
   wl_list_remove(&listener->link);
   free(listener);
@@ -1378,7 +1446,7 @@ void destroylock(SessionLock *lock, int unlock) {
 
   wlr_scene_node_set_enabled(&locked_bg->node, 0);
 
-  focusclient(focustop(selmon), 0);
+  focusclient(focustop(selmon), 0, 0);
   motionnotify(0, NULL, 0, 0, 0, 0);
 
 destroy:
@@ -1405,7 +1473,7 @@ void destroylocksurface(struct wl_listener *listener, void *data) {
     surface = wl_container_of(cur_lock->surfaces.next, surface, link);
     client_notify_enter(surface->surface, wlr_seat_get_keyboard(seat));
   } else if (!locked) {
-    focusclient(focustop(selmon), 1);
+    focusclient(focustop(selmon), 1, 0);
   } else {
     wlr_seat_keyboard_clear_focus(seat);
   }
@@ -1478,7 +1546,7 @@ Monitor *dirtomon(enum wlr_direction dir) {
   return selmon;
 }
 
-void focusclient(Client *c, int lift) {
+void focusclient(Client *c, int lift, int focus_mouse) {
   Client *old_c = NULL;
 
   if (locked)
@@ -1560,6 +1628,12 @@ void focusclient(Client *c, int lift) {
   /* Change cursor surface */
   motionnotify(0, NULL, 0, 0, 0, 0);
 
+  if (focus_mouse && mousefocus) {
+    double cx = c->geom.x + c->geom.width / 2;
+    double cy = c->geom.y + c->geom.height / 2;
+    wlr_cursor_move(cursor, NULL, cx - cursor->x, cy - cursor->y);
+  }
+
   client_notify_enter(client_surface(c), wlr_seat_get_keyboard(seat));
   wlr_seat_keyboard_clear_focus(seat);
 }
@@ -1586,7 +1660,7 @@ void focusmon(const Arg *arg) {
       selmon = dirtomon(arg->i);
     while (!selmon->wlr_output->enabled && i++ < nmons);
   }
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
 }
 
 void focusstack(const Arg *arg) {
@@ -1610,7 +1684,7 @@ void focusstack(const Arg *arg) {
     }
   }
   /* If only one client is visible on selmon, then c == sel */
-  focusclient(c, 1);
+  focusclient(c, 1, 1);
 }
 
 /* We probably should change the name of this: it sounds like it
@@ -1707,7 +1781,7 @@ int check_key_buffer_timeout(void *data) {
     }
   }
 
-  wl_event_source_timer_update(key_buffer_timout_timer, 10); // Run every 10ms
+  wl_event_source_timer_update(key_buffer_timeout_timer, 10); // Run every 10ms
   return 0;
 }
 
@@ -1773,8 +1847,15 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
   int res = 0;
 
   for (k = &(keys[0]); k < END(keys); k++) {
+    bool cond = false;
+    if (sym == 0 && (*k)->mousebtn.code != 0)
+      cond = cursor_buttons[(*k)->mousebtn.code] == (*k)->mousebtn.mode;
+    else
+      cond = (sym != 0 && (sym == (*k)->keysym.a || sym == (*k)->keysym.b)) &&
+             (cursor_buttons[(*k)->mousebtn.code] == (*k)->mousebtn.mode);
+
     if (vimmode & ((*k)->vimmode) && CLEANMASK(mods) == CLEANMASK((*k)->mod) &&
-        (sym == (*k)->keysym || sym == (*k)->altkeysym)) {
+        cond) {
       if ((*k)->next.action) {
         // Queue action
         if (*k != (*k)->start || !(*k)->next.action || fresh) {
@@ -1947,7 +2028,7 @@ void killclient(const Arg *arg) {
     removeselection(sel);
     client_send_close(sel);
   });
-  focusclient(focustop(selmon), 0);
+  focusclient(focustop(selmon), 0, 1);
   setvimmode(VIM_MODE_NORMAL);
 }
 
@@ -1960,7 +2041,7 @@ void locksession(struct wl_listener *listener, void *data) {
     return;
   }
   lock = session_lock->data = ecalloc(1, sizeof(*lock));
-  focusclient(NULL, 0);
+  focusclient(NULL, 0, 0);
 
   lock->scene = wlr_scene_tree_create(layers[LyrBlock]);
   cur_lock = lock->lock = session_lock;
@@ -2000,7 +2081,7 @@ void mapnotify(struct wl_listener *listener, void *data) {
     wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
     client_set_size(c, c->geom.width, c->geom.height);
     if (client_wants_focus(c)) {
-      focusclient(c, 1);
+      focusclient(c, 1, 0);
       exclusive_focus = c;
     }
     goto unset_fullscreen;
@@ -2107,7 +2188,11 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
   /* Find the client under the pointer and send the event along. */
   xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
-  if (cursor_mode == CurPressed && !seat->drag &&
+  bool pressed = false;
+  for (int i = 0; i < LENGTH(cursor_buttons); i++)
+    pressed |= (cursor_buttons[i] == CurHold || cursor_buttons[i] == CurDrag);
+
+  if (pressed && !seat->drag &&
       surface != seat->pointer_state.focused_surface &&
       toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >=
           0) {
@@ -2126,8 +2211,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
     wl_list_for_each(constraint, &pointer_constraints->constraints, link)
         cursorconstrain(constraint);
 
-    if (active_constraint && cursor_mode != CurResize &&
-        cursor_mode != CurMove) {
+    if (active_constraint && (grab_mode == GrabNone || grab_mode == GrabWait)) {
       toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
       if (c &&
           active_constraint->surface == seat->pointer_state.focused_surface) {
@@ -2157,7 +2241,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
                               (int)round(cursor->y));
 
   /* If we are currently grabbing the mouse, handle and return */
-  if (cursor_mode == CurMove) {
+  if (grab_mode == GrabMove) {
     /* Move the grabbed client to the new position. */
     resize(grabc,
            (struct wlr_box){.x = (int)round(cursor->x) - grabcx,
@@ -2166,7 +2250,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
                             .height = grabc->geom.height},
            1);
     return;
-  } else if (cursor_mode == CurResize) {
+  } else if (grab_mode == GrabResize) {
     resize(grabc,
            (struct wlr_box){.x = grabc->geom.x,
                             .y = grabc->geom.y,
@@ -2196,24 +2280,51 @@ void motionrelative(struct wl_listener *listener, void *data) {
    * the cursor around without any input. */
   motionnotify(event->time_msec, &event->pointer->base, event->delta_x,
                event->delta_y, event->unaccel_dx, event->unaccel_dy);
+
+  grab_mode = GrabWait;
+
+  struct wlr_keyboard *keyboard;
+  uint32_t mods;
+
+  keyboard = wlr_seat_get_keyboard(seat);
+  mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
+
+  for (int i = 0; i < LENGTH(cursor_buttons); i++) {
+    if (cursor_buttons[i] == CurHold)
+      cursor_buttons[i] = CurDrag;
+  }
+
+  keybinding(mods, 0);
+
+  for (int i = 0; i < LENGTH(cursor_buttons); i++) {
+    if (cursor_buttons[i] == CurDrag)
+      cursor_buttons[i] = CurHold;
+  }
+
+  if (grab_mode == GrabWait)
+    grab_mode = GrabNone;
 }
 
 void moveresize(const Arg *arg) {
-  if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+  if (grab_mode != GrabNone && grab_mode != GrabWait)
     return;
-  xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
+
+  if (!grabc) {
+    xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
+  }
+
   if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
     return;
 
   /* Float the window and tell motionnotify to grab it */
   setfloating(grabc, 1);
-  switch (cursor_mode = arg->ui) {
-  case CurMove:
+  switch (grab_mode = arg->ui) {
+  case GrabMove:
     grabcx = (int)round(cursor->x) - grabc->geom.x;
     grabcy = (int)round(cursor->y) - grabc->geom.y;
     wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
     break;
-  case CurResize:
+  case GrabResize:
     /* Doesn't work for X11 output - the next absolute motion event
      * returns the cursor to where it started */
     wlr_cursor_warp_closest(cursor, NULL, grabc->geom.x + grabc->geom.width,
@@ -2300,9 +2411,10 @@ void pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
                   uint32_t time) {
   struct timespec now;
 
-  if (surface != seat->pointer_state.focused_surface && sloppyfocus && time &&
-      c && !client_is_unmanaged(c))
-    focusclient(c, 0);
+  if ((!seat->pointer_state.focused_surface ||
+       surface != seat->pointer_state.focused_surface) &&
+      sloppyfocus && time && c && !client_is_unmanaged(c))
+    focusclient(c, 0, 0);
 
   /* If surface is NULL, clear pointer focus */
   if (!surface) {
@@ -2528,7 +2640,7 @@ void setcursor(struct wl_listener *listener, void *data) {
    * restore it after "grabbing" sending a leave event, followed by a enter
    * event, which will result in the client requesting set the cursor surface
    */
-  if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+  if (grab_mode != GrabNone || grab_mode != GrabWait)
     return;
   /* This can be sent by any client, so we check to make sure this one
    * actually has pointer focus first. If so, we can tell the cursor to
@@ -2542,7 +2654,7 @@ void setcursor(struct wl_listener *listener, void *data) {
 
 void setcursorshape(struct wl_listener *listener, void *data) {
   struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
-  if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+  if (grab_mode != GrabNone || grab_mode != GrabWait)
     return;
   /* This can be sent by any client, so we check to make sure this one
    * actually has pointer focus first. If so, we can tell the cursor to
@@ -2635,7 +2747,7 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
     setfullscreen(c, c->isfullscreen);     /* This will call arrange(c->mon) */
     setfloating(c, c->isfloating);
   }
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
 }
 
 void setpsel(struct wl_listener *listener, void *data) {
@@ -2835,6 +2947,7 @@ void setup(void) {
   wl_signal_add(&cursor->events.motion, &cursor_motion);
   wl_signal_add(&cursor->events.motion_absolute, &cursor_motion_absolute);
   wl_signal_add(&cursor->events.button, &cursor_button);
+  wl_signal_add(&cursor->events.button, &cursor_button);
   wl_signal_add(&cursor->events.axis, &cursor_axis);
   wl_signal_add(&cursor->events.frame, &cursor_frame);
 
@@ -2871,9 +2984,9 @@ void setup(void) {
   wl_signal_add(&output_mgr->events.test, &output_mgr_test);
 
   /* Setup the key buffer timeout checker */
-  key_buffer_timout_timer =
+  key_buffer_timeout_timer =
       wl_event_loop_add_timer(event_loop, check_key_buffer_timeout, NULL);
-  wl_event_source_timer_update(key_buffer_timout_timer, 10); // 10ms interval
+  wl_event_source_timer_update(key_buffer_timeout_timer, 10); // 10ms interval
 
   /* Make sure XWayland clients don't connect to the parent X server,
    * e.g when running in the x11 backend or the wayland backend and the
@@ -2920,7 +3033,7 @@ void tag(const Arg *arg) {
     return;
 
   sel->tags = arg->ui & TAGMASK;
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
 
   printstatus();
@@ -2992,7 +3105,7 @@ void toggletag(const Arg *arg) {
     return;
 
   sel->tags = newtags;
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
   printstatus();
 }
@@ -3004,7 +3117,7 @@ void toggleview(const Arg *arg) {
     return;
 
   selmon->tagset[selmon->seltags] = newtagset;
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
   printstatus();
 }
@@ -3024,7 +3137,7 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
   if (l->layer_surface->output && (l->mon = l->layer_surface->output->data))
     arrangelayers(l->mon);
   if (l->layer_surface->surface == seat->keyboard_state.focused_surface)
-    focusclient(focustop(selmon), 1);
+    focusclient(focustop(selmon), 1, 0);
   motionnotify(0, NULL, 0, 0, 0, 0);
 }
 
@@ -3032,14 +3145,14 @@ void unmapnotify(struct wl_listener *listener, void *data) {
   /* Called when the surface is unmapped, and should no longer be shown. */
   Client *c = wl_container_of(listener, c, unmap);
   if (c == grabc) {
-    cursor_mode = CurNormal;
+    grab_mode = GrabNone;
     grabc = NULL;
   }
 
   if (client_is_unmanaged(c)) {
     if (c == exclusive_focus) {
       exclusive_focus = NULL;
-      focusclient(focustop(selmon), 1);
+      focusclient(focustop(selmon), 1, 0);
     }
   } else {
     wl_list_remove(&c->link);
@@ -3141,7 +3254,7 @@ void updatemons(struct wl_listener *listener, void *data) {
       if (!c->mon && client_surface(c)->mapped)
         setmon(c, selmon, c->tags);
     }
-    focusclient(focustop(selmon), 1);
+    focusclient(focustop(selmon), 1, 0);
     if (selmon->lock_surface) {
       client_notify_enter(selmon->lock_surface->surface,
                           wlr_seat_get_keyboard(seat));
@@ -3185,7 +3298,7 @@ void view(const Arg *arg) {
   selmon->seltags ^= 1; /* toggle sel tagset */
   if (arg->ui & TAGMASK)
     selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
 
   printstatus();
@@ -3278,7 +3391,7 @@ void zoom(const Arg *arg) {
   wl_list_remove(&sel->link);
   wl_list_insert(&clients, &sel->link);
 
-  focusclient(sel, 1);
+  focusclient(sel, 1, 0);
   arrange(selmon);
 }
 
@@ -3366,8 +3479,31 @@ int set_mods(Key *ref, char **str) {
 
 void set_key(Key *ref, char *str) {
   ref->mod = 0;
+  ref->keysym.a = 0;
+  ref->keysym.b = 0;
+  ref->mousebtn.code = 0;
+  ref->mousebtn.mode = 0;
 
   set_mods(ref, &str);
+
+  for (MouseAlias *alias = mouse_aliases; alias < END(mouse_aliases); alias++) {
+    if (strncmp(str, alias->alias, strlen(alias->alias)) == 0) {
+      // Mouse button found
+      ref->keysym.a = 0;
+      ref->keysym.b = 0;
+      ref->mousebtn.code = (alias->btn - BTN_MOUSE + 1);
+      str += strlen(alias->alias);
+      if (strcmp(str, "Mouse") == 0)
+        ref->mousebtn.mode = CurClick;
+      else if (strcmp(str, "Release") == 0)
+        ref->mousebtn.mode = CurRelease;
+      else if (strcmp(str, "Drag") == 0)
+        ref->mousebtn.mode = CurDrag;
+      else if (strcmp(str, "Hold") == 0)
+        ref->mousebtn.mode = CurHold;
+      return;
+    }
+  }
 
   bool changed = false;
   uint8_t loops = 0;
@@ -3393,8 +3529,8 @@ void set_key(Key *ref, char *str) {
     xkb_keysym_t right = xkb_keysym_from_name(buf, XKB_KEYSYM_NO_FLAGS);
     if (left != 0 && right != 0) {
       // Key has _L and _R versions
-      ref->keysym = left;
-      ref->altkeysym = right;
+      ref->keysym.a = left;
+      ref->keysym.b = right;
       return;
     }
     printf("Invalid key: %s (may be part of a longer keybind)\n", str);
@@ -3413,7 +3549,7 @@ void set_key(Key *ref, char *str) {
     }
   }
 
-  ref->keysym = base;
+  ref->keysym.a = base;
 }
 
 void makekeys() {
