@@ -104,13 +104,6 @@
   }
 
 /* enums */
-enum {
-  CurNone,
-  CurClick,
-  CurRelease,
-  CurDrag,
-  CurHold,
-}; /* cursor */
 enum { GrabNone, GrabMove, GrabResize, GrabWait }; /* grab modes */
 enum { XDGShell, LayerShell, X11 };                /* client types */
 enum {
@@ -209,10 +202,6 @@ struct Key {
     xkb_keysym_t a;
     xkb_keysym_t b;
   } keysym;
-  struct {
-    uint16_t code;
-    uint8_t mode;
-  } mousebtn;
   struct {
     Key *key;
     Action *action;
@@ -394,7 +383,7 @@ static void handlesig(int signo);
 static void incnmaster(const Arg *arg);
 static void inputdevice(struct wl_listener *listener, void *data);
 static int check_key_buffer_timeout(void *data);
-static void apply_queued_actions(bool force);
+static void apply_queued_actions(bool reset);
 static int keybinding(uint32_t mods, xkb_keysym_t sym);
 static void keypress(struct wl_listener *listener, void *data);
 static void keypressmod(struct wl_listener *listener, void *data);
@@ -461,6 +450,13 @@ static void zoom(const Arg *arg);
 static int setvimmode(const uint8_t mode);
 static void makekeys();
 static int set_mods(Key *ref, char **str);
+static int get_mouse_keysym(int mouse_code);
+static int get_mouse_modifier(int mouse_code);
+static uint32_t set_keyboard_mods(uint32_t base, uint8_t keyboard);
+static uint32_t add_mouse_mods(uint32_t base, uint16_t mouse);
+static uint32_t remove_mouse_mods(uint32_t base, uint16_t mouse);
+static uint16_t get_mouse_mods(uint32_t base);
+static uint8_t get_keyboard_mods(uint32_t base);
 static void set_key(Key *ref, char *str);
 
 /* variables */
@@ -469,6 +465,7 @@ static int locked;
 static void *exclusive_focus;
 static struct wl_display *dpy;
 static struct wl_event_loop *event_loop;
+
 static struct wlr_backend *backend;
 static struct wlr_scene *scene;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
@@ -515,7 +512,6 @@ static struct wlr_session_lock_v1 *cur_lock;
 
 static struct wlr_seat *seat;
 static KeyboardGroup *kb_group;
-static uint8_t cursor_buttons[17]; /* 16 button codes + 1 always zero */
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
 static uint8_t grab_mode;
@@ -776,22 +772,16 @@ void axisnotify(struct wl_listener *listener, void *data) {
 void buttonpress(struct wl_listener *listener, void *data) {
   struct wlr_pointer_button_event *event = data;
   struct wlr_keyboard *keyboard;
-  uint32_t mods;
   Client *c;
   const Button *b;
 
   wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-
-  keyboard = wlr_seat_get_keyboard(seat);
-  mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
 
   switch (event->state) {
   case WL_POINTER_BUTTON_STATE_PRESSED:
     // Check if the button code is a real button
     if (event->button < BTN_MOUSE || event->button >= BTN_MOUSE + 16)
       return;
-
-    cursor_buttons[event->button - BTN_MOUSE + 1] = CurClick;
 
     selmon = xytomon(cursor->x, cursor->y);
     if (locked)
@@ -802,9 +792,10 @@ void buttonpress(struct wl_listener *listener, void *data) {
     if (c && (!client_is_unmanaged(c) || client_wants_focus(c)))
       focusclient(c, 1, 0);
 
-    bool handled = keybinding(mods, 0);
+    bool handled = keybinding(kb_group->mods, get_mouse_keysym(event->button));
 
-    cursor_buttons[event->button - BTN_MOUSE + 1] = CurHold;
+    kb_group->mods =
+        add_mouse_mods(kb_group->mods, get_mouse_modifier(event->button));
 
     if (handled)
       return;
@@ -824,30 +815,13 @@ void buttonpress(struct wl_listener *listener, void *data) {
     if (event->button < BTN_MOUSE || event->button >= BTN_MOUSE + 16)
       return;
 
-    handled = false;
+    kb_group->mods =
+        remove_mouse_mods(kb_group->mods, get_mouse_modifier(event->button));
 
-    cursor_buttons[event->button - BTN_MOUSE + 1] = CurRelease;
+    // No release keysym
+    keybinding(kb_group->mods, 0);
 
-    grab_mode = GrabWait;
-
-    keybinding(mods, 0);
-
-    if (!locked && (grab_mode == GrabWait) && grabc) {
-      wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
-      grab_mode = GrabNone;
-
-      /* Drop the window off on its new monitor */
-      selmon = xytomon(cursor->x, cursor->y);
-      setmon(grabc, selmon, 0);
-      if (!client_is_unmanaged(grabc) || client_wants_focus(grabc))
-        focusclient(grabc, 1, 0);
-      grabc = NULL;
-      handled = true;
-    }
-
-    cursor_buttons[event->button - BTN_MOUSE + 1] = CurNone;
-
-    if (handled)
+    if (grab_mode == GrabNone)
       return;
     break;
   }
@@ -1777,7 +1751,7 @@ int check_key_buffer_timeout(void *data) {
     double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
 
     if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
-      apply_queued_actions(false);
+      apply_queued_actions(true);
     }
   }
 
@@ -1785,29 +1759,37 @@ int check_key_buffer_timeout(void *data) {
   return 0;
 }
 
-void apply_queued_actions(bool force) {
+void apply_queued_actions(bool reset) {
   // Clear the key_buffer
   key_buffer[0] = '\0';
 
   Key **k;
-  if (apply_actions || force) {
+  if (apply_actions) {
     apply_actions = false;
+    printf("Apply\n");
 
-    for (k = &(keys[0]); k < END(keys); k++) {
+    for (k = keys; k < END(keys); k++) {
       if ((*k)->next.action && (*k)->next.action->queued) {
+        printf("Action: %d\n", (*k)->keysym.a);
+        fflush(stdout);
         if ((*k)->next.action->func) {
           (*k)->next.action->func(&((*k)->next.action->arg));
         } else if ((*k)->next.action->setvimmode != -1) {
           setvimmode((*k)->next.action->setvimmode);
         }
+
+        (*k)->next.action->queued = false;
+        *k = (*k)->start;
       }
     }
 
-    for (k = &(keys[0]); k < END(keys); k++) {
-      // Reset the key
-      if ((*k)->next.action)
-        (*k)->next.action->queued = false;
-      *k = (*k)->start;
+    if (reset) {
+      for (k = keys; k < END(keys); k++) {
+        /* Reset the key */
+        if ((*k)->next.action)
+          (*k)->next.action->queued = false;
+        *k = (*k)->start;
+      }
     }
   }
 
@@ -1827,10 +1809,14 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
 
   bool fresh = true;
 
+  grab_mode = GrabWait;
+
+  printf("BIND: mods %d, sym %d\n", mods, sym);
+
   Key **k;
   if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
     key_buffer[0] = '\0';
-    for (k = &(keys[0]); k < END(keys); k++) {
+    for (k = keys; k < END(keys); k++) {
       // Reset the key
       if ((*k)->next.action)
         (*k)->next.action->queued = false;
@@ -1838,55 +1824,85 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
     }
     fresh = true;
   } else {
-    for (k = &(keys[0]); k < END(keys); k++) {
-      fresh &= (*k == (*k)->start);
+    for (k = keys; k < END(keys); k++) {
+      fresh &= *k == (*k)->start;
     }
   }
 
   int action_count = 0;
-  int res = 0;
 
-  for (k = &(keys[0]); k < END(keys); k++) {
-    bool cond = false;
-    if (sym == 0 && (*k)->mousebtn.code != 0)
-      cond = cursor_buttons[(*k)->mousebtn.code] == (*k)->mousebtn.mode;
+  for (k = keys; k < END(keys); k++) {
+    bool match = false;
+    if ((*k)->keysym.a == 0 && (*k)->keysym.b == 0)
+      match = true;
     else
-      cond = (sym != 0 && (sym == (*k)->keysym.a || sym == (*k)->keysym.b)) &&
-             (cursor_buttons[(*k)->mousebtn.code] == (*k)->mousebtn.mode);
+      match = sym == (*k)->keysym.a || sym == (*k)->keysym.b;
 
     if (vimmode & ((*k)->vimmode) && CLEANMASK(mods) == CLEANMASK((*k)->mod) &&
-        cond) {
+        match) {
       if ((*k)->next.action) {
         // Queue action
-        if (*k != (*k)->start || !(*k)->next.action || fresh) {
+        if (*k != (*k)->start || !(*k)->next.action || fresh ||
+            ((*k)->keysym.a == 0 && (*k)->keysym.b == 0)) {
           (*k)->next.action->queued = true;
-          action_count++;
           apply_actions = true;
+          action_count++;
+
+          printf("Queued: %d\n", (*k)->keysym.a);
         }
+
+        printf("Skipped\n");
       } else if ((*k)->next.key) {
         // Key chain not finished -> continue it
         *k = (*k)->next.key;
         action_count++;
+        printf("Next\n");
       }
-
-      res = 1;
-    } else {
+    } else if (sym != 0) {
+      /* Reset keybind */
       if ((*k)->next.action) {
         (*k)->next.action->queued = false;
       }
       *k = (*k)->start;
+      printf("Resetting: %d, %d\n", (*k)->keysym.a, (*k)->keysym.b);
     }
   }
+
+  printf("Action count: %d\n", action_count);
 
   if (action_count > 0)
     last_key_time = time_sec;
 
-  if (action_count <= 1) {
+  if (action_count == 1) {
     // If there are no conflicts
-    apply_queued_actions(true);
+    apply_actions = true;
+    apply_queued_actions(sym == 0);
   }
 
-  return res;
+  if (grab_mode == GrabWait) {
+    if (!locked && grabc) {
+      wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+
+      /* Drop the window off on its new monitor */
+      selmon = xytomon(cursor->x, cursor->y);
+      setmon(grabc, selmon, 0);
+      if (!client_is_unmanaged(grabc) || client_wants_focus(grabc))
+        focusclient(grabc, 1, 0);
+      grabc = NULL;
+    }
+
+    grab_mode = GrabNone;
+  }
+
+  for (k = keys; k < END(keys); k++) {
+    Key *k2 = *k;
+    do {
+      printf("(%d, %d/%d)->", k2->mod, k2->keysym.a, k2->keysym.b);
+    } while (k2 = k2->next.key);
+    printf("\n");
+  }
+
+  return action_count;
 }
 
 void keypress(struct wl_listener *listener, void *data) {
@@ -1905,69 +1921,81 @@ void keypress(struct wl_listener *listener, void *data) {
   int handled = 0;
 
   uint32_t raw_mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
+  printf("Mods: %b\n", raw_mods);
+
+  uint32_t mods = set_keyboard_mods(group->mods, raw_mods);
 
   /* xkb_mod_mask_t consumed = xkb_state_key_get_consumed_mods2(
       group->wlr_group->keyboard.xkb_state, keycode, XKB_CONSUMED_MODE_XKB);
    */
-
-  uint32_t mods = raw_mods;
 
   wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
   /* On _press_ if there is no active screen locker,
    * attempt to process a compositor keybinding. */
 
-  if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-    for (i = 0; i < nsyms; i++) {
-      const xkb_keysym_t *sym;
-      xkb_layout_index_t layout = xkb_state_key_get_layout(
-          group->wlr_group->keyboard.xkb_state, keycode);
-      int n = xkb_keymap_key_get_syms_by_level(
-          *(&group->wlr_group->keyboard.keymap), keycode, layout, 0, &sym);
+  if (!locked) {
+    if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+      for (i = 0; i < nsyms; i++) {
+        const xkb_keysym_t *sym;
+        xkb_layout_index_t layout = xkb_state_key_get_layout(
+            group->wlr_group->keyboard.xkb_state, keycode);
+        int n = xkb_keymap_key_get_syms_by_level(
+            *(&group->wlr_group->keyboard.keymap), keycode, layout, 0, &sym);
 
-      xkb_keysym_t curr_sym;
+        xkb_keysym_t curr_sym;
 
-      if (mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && (n > 0)) {
-        if ((mods & WLR_MODIFIER_SHIFT) &&
-            xkb_keysym_to_upper(*sym) != xkb_keysym_to_lower(*sym)) {
+        if (raw_mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && (n > 0)) {
+          if ((raw_mods & WLR_MODIFIER_SHIFT) &&
+              xkb_keysym_to_upper(*sym) != xkb_keysym_to_lower(*sym)) {
+            // Keysym has a lowercase and uppercase variant
+            curr_sym = xkb_keysym_to_upper(*sym);
+            raw_mods &= ~WLR_MODIFIER_SHIFT;
+          } else
+            curr_sym = *sym;
+
+        } else if ((mods & WLR_MODIFIER_SHIFT) &&
+                   xkb_keysym_to_upper(syms[i]) !=
+                       xkb_keysym_to_lower(syms[i])) {
           // Keysym has a lowercase and uppercase variant
-          curr_sym = xkb_keysym_to_upper(*sym);
-          mods &= ~WLR_MODIFIER_SHIFT;
+          curr_sym = xkb_keysym_to_upper(syms[i]);
+          raw_mods &= ~WLR_MODIFIER_SHIFT;
         } else
-          curr_sym = *sym;
+          curr_sym = syms[i];
 
-      } else if ((mods & WLR_MODIFIER_SHIFT) &&
-                 xkb_keysym_to_upper(syms[i]) != xkb_keysym_to_lower(syms[i])) {
-        // Keysym has a lowercase and uppercase variant
-        curr_sym = xkb_keysym_to_upper(syms[i]);
-        mods &= ~WLR_MODIFIER_SHIFT;
-      } else
-        curr_sym = syms[i];
-
-      handled = keybinding(mods, curr_sym);
-      if (handled) {
-        char utf8[8];
-        int count = xkb_keysym_to_utf8(curr_sym, utf8, sizeof(utf8));
-        if (count == 2 && utf8[0] >= '!' && utf8[0] <= '~') {
-          // Pretty-printable codes
-          int i = 0;
-          for (; *(key_buffer + i) != '\0'; i++)
-            ;
-          *(key_buffer + i) = utf8[0];
-          *(key_buffer + i + 1) = '\0';
-        } else {
-          // Fallback to ascii / utf code
-          for (int i = 0; i < count - 1; i++) {
-            char tmp[4];
-            sprintf(tmp, "%02x", (unsigned char)utf8[i]);
-            strcat(key_buffer, "<");
-            strcat(key_buffer, tmp);
-            strcat(key_buffer, ">");
+        mods = set_keyboard_mods(group->mods, raw_mods);
+        handled = keybinding(mods, curr_sym);
+        if (handled) {
+          char utf8[8];
+          int count = xkb_keysym_to_utf8(curr_sym, utf8, sizeof(utf8));
+          if (count == 2 && utf8[0] >= '!' && utf8[0] <= '~') {
+            // Pretty-printable codes
+            int i = 0;
+            for (; *(key_buffer + i) != '\0'; i++)
+              ;
+            *(key_buffer + i) = utf8[0];
+            *(key_buffer + i + 1) = '\0';
+          } else {
+            // Fallback to ascii / utf code
+            for (int i = 0; i < count - 1; i++) {
+              char tmp[4];
+              sprintf(tmp, "%02x", (unsigned char)utf8[i]);
+              strcat(key_buffer, "<");
+              strcat(key_buffer, tmp);
+              strcat(key_buffer, ">");
+            }
           }
+          printstatus();
+          break;
         }
-        printstatus();
-        break;
       }
+    } else if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+      mods = set_keyboard_mods(group->mods, raw_mods);
+
+      keybinding(mods, 0);
+      group->mods = mods;
+      group->keysyms = syms;
+      group->nsyms = nsyms;
     }
   }
 
@@ -1999,6 +2027,10 @@ void keypressmod(struct wl_listener *listener, void *data) {
   /* This event is raised when a modifier key, such as shift or alt, is
    * pressed. We simply communicate this to the client. */
   KeyboardGroup *group = wl_container_of(listener, group, modifiers);
+
+  uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
+  group->mods = mods;
+  keybinding(mods, 0);
 
   wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
   /* Send modifiers to the client. */
@@ -2188,11 +2220,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
   /* Find the client under the pointer and send the event along. */
   xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
-  bool pressed = false;
-  for (int i = 0; i < LENGTH(cursor_buttons); i++)
-    pressed |= (cursor_buttons[i] == CurHold || cursor_buttons[i] == CurDrag);
-
-  if (pressed && !seat->drag &&
+  if ((grab_mode == GrabResize || grab_mode == GrabMove) && !seat->drag &&
       surface != seat->pointer_state.focused_surface &&
       toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >=
           0) {
@@ -2273,36 +2301,17 @@ void motionrelative(struct wl_listener *listener, void *data) {
   /* This event is forwarded by the cursor when a pointer emits a _relative_
    * pointer motion event (i.e. a delta) */
   struct wlr_pointer_motion_event *event = data;
+
   /* The cursor doesn't move unless we tell it to. The cursor automatically
    * handles constraining the motion to the output layout, as well as any
    * special configuration applied for the specific input device which
    * generated the event. You can pass NULL for the device if you want to move
    * the cursor around without any input. */
+
+  keybinding(kb_group->mods, 0);
+
   motionnotify(event->time_msec, &event->pointer->base, event->delta_x,
                event->delta_y, event->unaccel_dx, event->unaccel_dy);
-
-  grab_mode = GrabWait;
-
-  struct wlr_keyboard *keyboard;
-  uint32_t mods;
-
-  keyboard = wlr_seat_get_keyboard(seat);
-  mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
-
-  for (int i = 0; i < LENGTH(cursor_buttons); i++) {
-    if (cursor_buttons[i] == CurHold)
-      cursor_buttons[i] = CurDrag;
-  }
-
-  keybinding(mods, 0);
-
-  for (int i = 0; i < LENGTH(cursor_buttons); i++) {
-    if (cursor_buttons[i] == CurDrag)
-      cursor_buttons[i] = CurHold;
-  }
-
-  if (grab_mode == GrabWait)
-    grab_mode = GrabNone;
 }
 
 void moveresize(const Arg *arg) {
@@ -2654,7 +2663,7 @@ void setcursor(struct wl_listener *listener, void *data) {
 
 void setcursorshape(struct wl_listener *listener, void *data) {
   struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
-  if (grab_mode != GrabNone || grab_mode != GrabWait)
+  if (grab_mode != GrabNone && grab_mode != GrabWait)
     return;
   /* This can be sent by any client, so we check to make sure this one
    * actually has pointer focus first. If so, we can tell the cursor to
@@ -3447,60 +3456,116 @@ int setvimmode(const uint8_t mode) {
 
 int set_mods(Key *ref, char **str) {
   int offset = 0;
+  uint8_t keyboard_mods = 0;
 
   regex_t reegex;
   regcomp(&reegex, ".*C\\-.*", 0);
   if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
-    ref->mod |= WLR_MODIFIER_CTRL;
+    keyboard_mods |= WLR_MODIFIER_CTRL;
     offset += 2;
   }
 
   regcomp(&reegex, ".*S\\-.*", 0);
   if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
-    ref->mod |= WLR_MODIFIER_SHIFT;
+    keyboard_mods |= WLR_MODIFIER_SHIFT;
     offset += 2;
   }
 
   regcomp(&reegex, ".*[AM]\\-.*", 0);
   if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
-    ref->mod |= WLR_MODIFIER_ALT;
+    keyboard_mods |= WLR_MODIFIER_ALT;
     offset += 2;
   }
 
   regcomp(&reegex, ".*D\\-.*", 0);
   if (regexec(&reegex, *str, 0, NULL, 0) == 0) {
-    ref->mod |= WLR_MODIFIER_LOGO;
+    keyboard_mods |= WLR_MODIFIER_LOGO;
     offset += 2;
   }
 
+  ref->mod = set_keyboard_mods(ref->mod, keyboard_mods);
+
   *str += offset;
   return offset;
+}
+
+int get_mouse_keysym(int mouse_code) {
+/* mouse_code is BTN_... from the input-event-codes library */
+#define FIRST_BUTTON 0x10001000
+  return FIRST_BUTTON + (mouse_code - BTN_MOUSE);
+}
+
+int get_mouse_modifier(int mouse_code) {
+/* mouse_code is BTN_... from the input-event-codes library */
+#define FIRST_BUTTON 8
+  return FIRST_BUTTON + mouse_code;
+}
+
+uint32_t set_keyboard_mods(uint32_t base, uint8_t keyboard) {
+#define KEYBOARD_SIZE 8
+  uint32_t mask = (1U << KEYBOARD_SIZE) - 1;
+
+  uint32_t res = base;
+  res &= ~mask;
+  res |= keyboard & mask;
+  return res;
+}
+
+uint32_t add_mouse_mods(uint32_t base, uint16_t mouse) {
+#define KEYBOARD_SIZE 8
+  uint32_t mask = ~((1U << KEYBOARD_SIZE) - 1);
+
+  uint32_t res = base;
+  res |= (mouse << KEYBOARD_SIZE) & mask;
+  return res;
+}
+
+uint32_t remove_mouse_mods(uint32_t base, uint16_t mouse) {
+#define KEYBOARD_SIZE 8
+  uint32_t mask = ~((1U << KEYBOARD_SIZE) - 1);
+
+  uint32_t res = base;
+  res &= ~((mouse << KEYBOARD_SIZE) & mask);
+  return res;
+}
+
+uint16_t get_mouse_mods(uint32_t base) {
+#define KEYBOARD_SIZE 8
+  return base >> KEYBOARD_SIZE;
+}
+
+uint8_t get_keyboard_mods(uint32_t base) {
+#define KEYBOARD_SIZE 8
+  uint32_t mask = (1U << KEYBOARD_SIZE) - 1;
+  return base & mask;
 }
 
 void set_key(Key *ref, char *str) {
   ref->mod = 0;
   ref->keysym.a = 0;
   ref->keysym.b = 0;
-  ref->mousebtn.code = 0;
-  ref->mousebtn.mode = 0;
 
   set_mods(ref, &str);
 
   for (MouseAlias *alias = mouse_aliases; alias < END(mouse_aliases); alias++) {
     if (strncmp(str, alias->alias, strlen(alias->alias)) == 0) {
       // Mouse button found
-      ref->keysym.a = 0;
-      ref->keysym.b = 0;
-      ref->mousebtn.code = (alias->btn - BTN_MOUSE + 1);
+      int mouse_code = alias->btn;
       str += strlen(alias->alias);
-      if (strcmp(str, "Mouse") == 0)
-        ref->mousebtn.mode = CurClick;
-      else if (strcmp(str, "Release") == 0)
-        ref->mousebtn.mode = CurRelease;
-      else if (strcmp(str, "Drag") == 0)
-        ref->mousebtn.mode = CurDrag;
-      else if (strcmp(str, "Hold") == 0)
-        ref->mousebtn.mode = CurHold;
+      uint16_t mouse_mods = 0;
+      if (strcmp(str, "Mouse") == 0) {
+        ref->keysym.a = get_mouse_keysym(mouse_code);
+        ref->keysym.b = 0;
+      } else if (strcmp(str, "Release") == 0) {
+        // Release not implemented yet
+        printf("RELEASE NOT IMPLEMENTED");
+        exit(1);
+      } else if (strcmp(str, "Drag") == 0) {
+        mouse_mods |= get_mouse_modifier(mouse_code);
+      } else if (strcmp(str, "Hold") == 0) {
+        mouse_mods |= get_mouse_modifier(mouse_code);
+      }
+      ref->mod = add_mouse_mods(ref->mod, mouse_mods);
       return;
     }
   }
@@ -3531,6 +3596,12 @@ void set_key(Key *ref, char *str) {
       // Key has _L and _R versions
       ref->keysym.a = left;
       ref->keysym.b = right;
+      return;
+    }
+    if (strlen(str) == 0) {
+      // Empty keysym
+      ref->keysym.a = 0;
+      ref->keysym.a = 0;
       return;
     }
     printf("Invalid key: %s (may be part of a longer keybind)\n", str);
@@ -3578,6 +3649,7 @@ void makekeys() {
         temp[i] = '\0';
         tail->vimmode = map->vimmode;
         set_key(tail, buf);
+        printf("Parsed: %s\n", buf);
         buf = NULL;
         if (temp[i + 1] != '\0') {
           tail->next.action = NULL;
@@ -3593,6 +3665,7 @@ void makekeys() {
           buf[1] = '\0';
           tail->vimmode = map->vimmode;
           set_key(tail, buf);
+          printf("Parsed: %s\n", buf);
           free(buf);
           buf = NULL;
           if (temp[i + 1] != '\0') {
@@ -3611,6 +3684,7 @@ void makekeys() {
     tail->next.action->setvimmode = -1;
     tail->next.action->func = map->func;
     tail->next.action->arg = map->arg;
+    tail->next.action->queued = false;
 
     free(temp);
     temp = NULL;

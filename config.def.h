@@ -166,7 +166,8 @@ static const KeyMap keymaps[] = {
     /* modifier                  key                  function argument */
     //{ MODKEY,                    XKB_KEY_p,           spawn, {.v =
     // menucmd} },
-    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
+
+    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = webbrowsercmd}},
     {VIM_MODE_NORMAL, "<leader>b", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<leader>ba", spawn, {.v = termcmd}},
 
@@ -187,11 +188,18 @@ static const KeyMap keymaps[] = {
     {VIM_MODE_NORMAL, "<C-A-T>", killclient, {0}},
 
     // Quit
-    {VIM_MODE_NORMAL, "<D-S-Esc>", quit, {0}},
+    {VIM_MODE_NORMAL, "<A-S-Esc>", quit, {0}},
 
     // Navigation
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusstack, {.i = -1}},
+
+    {VIM_MODE_NORMAL, "<C->", moveresize, {.ui = GrabMove}},
+
+    {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
+    {VIM_MODE_NORMAL, "<LeftMouse>u", spawn, {.v = termcmd}},
+    {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
+    {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
 
 // Quit
 //{VIM_MODE_NORMAL, WLR_MODIFIER_SHIFT, XKB_KEY_q, quit, {0}},
@@ -247,8 +255,4 @@ XKB_KEY_q,           quit,             {0} },*/
     CHVT(10),
     CHVT(11),
     CHVT(12),
-
-    {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
-    {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
-    {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
 };
