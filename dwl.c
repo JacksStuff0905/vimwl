@@ -383,6 +383,7 @@ static void handlesig(int signo);
 static void incnmaster(const Arg *arg);
 static void inputdevice(struct wl_listener *listener, void *data);
 static int check_key_buffer_timeout(void *data);
+static bool apply_action(Action *a, bool if_queued);
 static void apply_queued_actions(bool reset);
 static int keybinding(uint32_t mods, xkb_keysym_t sym);
 static void keypress(struct wl_listener *listener, void *data);
@@ -472,7 +473,6 @@ static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
 static uint8_t vimmode = VIM_MODE_NORMAL;
 static char key_buffer[100] = "";
-static double last_key_time = 0;
 static struct wl_event_source *key_buffer_timeout_timer;
 static bool apply_actions = false;
 
@@ -1745,41 +1745,41 @@ void inputdevice(struct wl_listener *listener, void *data) {
 }
 
 int check_key_buffer_timeout(void *data) {
-  if (apply_actions || strlen(key_buffer) > 0) {
-    struct timespec time;
-    clock_gettime(CLOCK_MONOTONIC, &time);
-    double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
+  key_buffer[0] = '\0';
 
-    if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
-      apply_queued_actions(true);
-    }
-  }
+  apply_queued_actions(true);
 
-  wl_event_source_timer_update(key_buffer_timeout_timer, 10); // Run every 10ms
+  wl_event_source_timer_update(key_buffer_timeout_timer, 0); // Stop timer
   return 0;
+}
+
+bool apply_action(Action *a, bool if_queued) {
+  if (a && (a->queued || !if_queued)) {
+    if (a->func) {
+      a->func(&(a->arg));
+    } else if (a->setvimmode != -1) {
+      setvimmode(a->setvimmode);
+    } else
+      return false;
+    return true;
+  }
+  return false;
 }
 
 void apply_queued_actions(bool reset) {
   // Clear the key_buffer
-  key_buffer[0] = '\0';
-
   Key **k;
   if (apply_actions) {
+    key_buffer[0] = '\0';
+
     apply_actions = false;
-    printf("Apply\n");
 
     for (k = keys; k < END(keys); k++) {
-      if ((*k)->next.action && (*k)->next.action->queued) {
-        printf("Action: %d\n", (*k)->keysym.a);
-        fflush(stdout);
-        if ((*k)->next.action->func) {
-          (*k)->next.action->func(&((*k)->next.action->arg));
-        } else if ((*k)->next.action->setvimmode != -1) {
-          setvimmode((*k)->next.action->setvimmode);
+      if (apply_action((*k)->next.action, true)) {
+        if (!reset) {
+          (*k)->next.action->queued = false;
+          *k = (*k)->start;
         }
-
-        (*k)->next.action->queued = false;
-        *k = (*k)->start;
       }
     }
 
@@ -1790,10 +1790,10 @@ void apply_queued_actions(bool reset) {
           (*k)->next.action->queued = false;
         *k = (*k)->start;
       }
+
+      printstatus();
     }
   }
-
-  printstatus();
 }
 
 int keybinding(uint32_t mods, xkb_keysym_t sym) {
@@ -1802,31 +1802,13 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
    * processing keys, rather than passing them on to the client for its own
    * processing.
    */
-
-  struct timespec time;
-  clock_gettime(CLOCK_MONOTONIC, &time);
-  double time_sec = (time.tv_sec) + (time.tv_nsec) / 1e9;
-
   bool fresh = true;
 
   grab_mode = GrabWait;
 
-  printf("BIND: mods %d, sym %d\n", mods, sym);
-
   Key **k;
-  if ((time_sec - last_key_time) > (key_timeout / 1000.0)) {
-    key_buffer[0] = '\0';
-    for (k = keys; k < END(keys); k++) {
-      // Reset the key
-      if ((*k)->next.action)
-        (*k)->next.action->queued = false;
-      *k = (*k)->start;
-    }
-    fresh = true;
-  } else {
-    for (k = keys; k < END(keys); k++) {
-      fresh &= *k == (*k)->start;
-    }
+  for (k = keys; k < END(keys); k++) {
+    fresh &= *k == (*k)->start;
   }
 
   int action_count = 0;
@@ -1835,6 +1817,8 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
     bool match = false;
     if ((*k)->keysym.a == 0 && (*k)->keysym.b == 0)
       match = true;
+    else if (sym == 0)
+      match = false;
     else
       match = sym == (*k)->keysym.a || sym == (*k)->keysym.b;
 
@@ -1842,21 +1826,18 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
         match) {
       if ((*k)->next.action) {
         // Queue action
-        if (*k != (*k)->start || !(*k)->next.action || fresh ||
-            ((*k)->keysym.a == 0 && (*k)->keysym.b == 0)) {
+        if ((*k)->keysym.a == 0 && (*k)->keysym.b == 0 &&
+            apply_action((*k)->next.action, false)) {
+          action_count++;
+        } else if (*k != (*k)->start || !(*k)->next.action || fresh) {
           (*k)->next.action->queued = true;
           apply_actions = true;
           action_count++;
-
-          printf("Queued: %d\n", (*k)->keysym.a);
         }
-
-        printf("Skipped\n");
       } else if ((*k)->next.key) {
         // Key chain not finished -> continue it
         *k = (*k)->next.key;
         action_count++;
-        printf("Next\n");
       }
     } else if (sym != 0) {
       /* Reset keybind */
@@ -1864,14 +1845,11 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
         (*k)->next.action->queued = false;
       }
       *k = (*k)->start;
-      printf("Resetting: %d, %d\n", (*k)->keysym.a, (*k)->keysym.b);
     }
   }
 
-  printf("Action count: %d\n", action_count);
-
   if (action_count > 0)
-    last_key_time = time_sec;
+    wl_event_source_timer_update(key_buffer_timeout_timer, key_timeout);
 
   if (action_count == 1) {
     // If there are no conflicts
@@ -1894,13 +1872,13 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
     grab_mode = GrabNone;
   }
 
-  for (k = keys; k < END(keys); k++) {
+  /*for (k = keys; k < END(keys); k++) {
     Key *k2 = *k;
     do {
       printf("(%d, %d/%d)->", k2->mod, k2->keysym.a, k2->keysym.b);
     } while (k2 = k2->next.key);
     printf("\n");
-  }
+  }*/
 
   return action_count;
 }
@@ -1921,7 +1899,6 @@ void keypress(struct wl_listener *listener, void *data) {
   int handled = 0;
 
   uint32_t raw_mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
-  printf("Mods: %b\n", raw_mods);
 
   uint32_t mods = set_keyboard_mods(group->mods, raw_mods);
 
@@ -1938,32 +1915,59 @@ void keypress(struct wl_listener *listener, void *data) {
     if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
       for (i = 0; i < nsyms; i++) {
         const xkb_keysym_t *sym;
+        struct xkb_keymap *keymap = group->wlr_group->keyboard.keymap;
         xkb_layout_index_t layout = xkb_state_key_get_layout(
             group->wlr_group->keyboard.xkb_state, keycode);
-        int n = xkb_keymap_key_get_syms_by_level(
-            *(&group->wlr_group->keyboard.keymap), keycode, layout, 0, &sym);
+        int n =
+            xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &sym);
 
-        xkb_keysym_t curr_sym;
-
-        if (raw_mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && (n > 0)) {
-          if ((raw_mods & WLR_MODIFIER_SHIFT) &&
-              xkb_keysym_to_upper(*sym) != xkb_keysym_to_lower(*sym)) {
-            // Keysym has a lowercase and uppercase variant
-            curr_sym = xkb_keysym_to_upper(*sym);
-            raw_mods &= ~WLR_MODIFIER_SHIFT;
-          } else
-            curr_sym = *sym;
-
-        } else if ((mods & WLR_MODIFIER_SHIFT) &&
-                   xkb_keysym_to_upper(syms[i]) !=
-                       xkb_keysym_to_lower(syms[i])) {
-          // Keysym has a lowercase and uppercase variant
-          curr_sym = xkb_keysym_to_upper(syms[i]);
-          raw_mods &= ~WLR_MODIFIER_SHIFT;
-        } else
-          curr_sym = syms[i];
-
+        xkb_keysym_t curr_sym = *sym;
         mods = set_keyboard_mods(group->mods, raw_mods);
+
+        if (!(mods & WLR_MODIFIER_SHIFT))
+          goto end;
+
+        xkb_keycode_t min_kc = xkb_keymap_min_keycode(keymap);
+        xkb_keycode_t max_kc = xkb_keymap_max_keycode(keymap);
+
+        for (xkb_keycode_t kc = min_kc; kc <= max_kc; kc++) {
+          xkb_layout_index_t num_layouts =
+              xkb_keymap_num_layouts_for_key(keymap, kc);
+
+          for (xkb_layout_index_t layout = 0; layout < num_layouts; layout++) {
+
+            const xkb_keysym_t *base_syms;
+            int num_base = xkb_keymap_key_get_syms_by_level(keymap, kc, layout,
+                                                            0, &base_syms);
+
+            bool match = false;
+            for (int i = 0; i < num_base; i++) {
+              if (base_syms[i] == curr_sym) {
+                match = true;
+                break;
+              }
+            }
+
+            if (match) {
+              const xkb_keysym_t *shifted_syms;
+              int num_shifted = xkb_keymap_key_get_syms_by_level(
+                  keymap, kc, layout, 1, &shifted_syms);
+
+              if (num_shifted > 0) {
+                xkb_keysym_t shifted_sym = shifted_syms[0];
+
+                if (shifted_sym != curr_sym) {
+                  curr_sym = shifted_sym;
+                  mods &= ~WLR_MODIFIER_SHIFT;
+                }
+              }
+
+              goto end;
+            }
+          }
+        }
+
+      end:
         handled = keybinding(mods, curr_sym);
         if (handled) {
           char utf8[8];
@@ -2220,8 +2224,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
   /* Find the client under the pointer and send the event along. */
   xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
 
-  if ((grab_mode == GrabResize || grab_mode == GrabMove) && !seat->drag &&
-      surface != seat->pointer_state.focused_surface &&
+  if ((grab_mode == GrabResize || grab_mode == GrabMove || time == 0) &&
+      !seat->drag && surface != seat->pointer_state.focused_surface &&
       toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >=
           0) {
     c = w;
@@ -2239,7 +2243,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
     wl_list_for_each(constraint, &pointer_constraints->constraints, link)
         cursorconstrain(constraint);
 
-    if (active_constraint && (grab_mode == GrabNone || grab_mode == GrabWait)) {
+    if (active_constraint && grab_mode != GrabNone && grab_mode != GrabWait) {
       toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
       if (c &&
           active_constraint->surface == seat->pointer_state.focused_surface) {
@@ -2894,9 +2898,6 @@ void setup(void) {
 
   wl_list_init(&selstack);
 
-  // Generate the key array from keymaps
-  makekeys();
-
   xdg_shell = wlr_xdg_shell_create(dpy, 6);
   wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
   wl_signal_add(&xdg_shell->events.new_popup, &new_xdg_popup);
@@ -2988,6 +2989,9 @@ void setup(void) {
   kb_group = createkeyboardgroup();
   wl_list_init(&kb_group->destroy.link);
 
+  // Generate the key array from keymaps
+  makekeys();
+
   output_mgr = wlr_output_manager_v1_create(dpy);
   wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
   wl_signal_add(&output_mgr->events.test, &output_mgr_test);
@@ -2995,7 +2999,7 @@ void setup(void) {
   /* Setup the key buffer timeout checker */
   key_buffer_timeout_timer =
       wl_event_loop_add_timer(event_loop, check_key_buffer_timeout, NULL);
-  wl_event_source_timer_update(key_buffer_timeout_timer, 10); // 10ms interval
+  wl_event_source_timer_update(key_buffer_timeout_timer, 0);
 
   /* Make sure XWayland clients don't connect to the parent X server,
    * e.g when running in the x11 backend or the wayland backend and the
@@ -3037,11 +3041,14 @@ void startdrag(struct wl_listener *listener, void *data) {
 }
 
 void tag(const Arg *arg) {
-  Client *sel = focustop(selmon);
-  if (!sel || (arg->ui & TAGMASK) == 0)
-    return;
+  Client *sel;
+  applytoselect(selmon, sel, {
+    if (!sel || (arg->ui & TAGMASK) == 0)
+      return;
 
-  sel->tags = arg->ui & TAGMASK;
+    sel->tags = arg->ui & TAGMASK;
+  });
+
   focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
 
@@ -3095,25 +3102,33 @@ void tile(Monitor *m) {
 }
 
 void togglefloating(const Arg *arg) {
-  Client *sel = focustop(selmon);
-  /* return if fullscreen */
-  if (sel && !sel->isfullscreen)
-    setfloating(sel, !sel->isfloating);
+  Client *sel;
+  applytoselect(selmon, sel, {
+    /* return if fullscreen */
+    if (sel && !sel->isfullscreen)
+      setfloating(sel, !sel->isfloating);
+  });
 }
 
 void togglefullscreen(const Arg *arg) {
-  Client *sel = focustop(selmon);
-  if (sel)
-    setfullscreen(sel, !sel->isfullscreen);
+  Client *sel;
+  applytoselect(selmon, sel, {
+    if (sel)
+      setfullscreen(sel, !sel->isfullscreen);
+  });
 }
 
 void toggletag(const Arg *arg) {
   uint32_t newtags;
-  Client *sel = focustop(selmon);
-  if (!sel || !(newtags = sel->tags ^ (arg->ui & TAGMASK)))
-    return;
 
-  sel->tags = newtags;
+  Client *sel;
+  applytoselect(selmon, sel, {
+    if (!sel || !(newtags = sel->tags ^ (arg->ui & TAGMASK)))
+      return;
+
+    sel->tags = newtags;
+  });
+
   focusclient(focustop(selmon), 1, 0);
   arrange(selmon);
   printstatus();
@@ -3283,16 +3298,23 @@ void updatemons(struct wl_listener *listener, void *data) {
 
 void updatetitle(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, set_title);
-  if (c == focustop(c->mon))
-    printstatus();
+
+  Client *sel;
+  applytoselect(c->mon, sel, {
+    if (c == sel)
+      printstatus();
+  });
 }
 
 void urgent(struct wl_listener *listener, void *data) {
   struct wlr_xdg_activation_v1_request_activate_event *event = data;
   Client *c = NULL;
   toplevel_from_wlr_surface(event->surface, &c, NULL);
-  if (!c || c == focustop(selmon))
-    return;
+  Client *sel;
+  applytoselect(selmon, sel, {
+    if (!c || c == sel)
+      return;
+  });
 
   c->isurgent = 1;
   printstatus();
@@ -3374,33 +3396,35 @@ void xytonode(double x, double y, struct wlr_surface **psurface, Client **pc,
 }
 
 void zoom(const Arg *arg) {
-  Client *c, *sel = focustop(selmon);
+  Client *c, *sel;
+  applytoselect(selmon, sel, {
+    if (!sel || !selmon || !selmon->lt[selmon->sellt]->arrange ||
+        sel->isfloating)
+      return;
 
-  if (!sel || !selmon || !selmon->lt[selmon->sellt]->arrange || sel->isfloating)
-    return;
-
-  /* Search for the first tiled window that is not sel, marking sel as
-   * NULL if we pass it along the way */
-  wl_list_for_each(c, &clients, link) {
-    if (VISIBLEON(c, selmon) && !c->isfloating) {
-      if (c != sel)
-        break;
-      sel = NULL;
+    /* Search for the first tiled window that is not sel, marking sel as
+     * NULL if we pass it along the way */
+    wl_list_for_each(c, &clients, link) {
+      if (VISIBLEON(c, selmon) && !c->isfloating) {
+        if (c != sel)
+          break;
+        sel = NULL;
+      }
     }
-  }
 
-  /* Return if no other tiled window was found */
-  if (&c->link == &clients)
-    return;
+    /* Return if no other tiled window was found */
+    if (&c->link == &clients)
+      return;
 
-  /* If we passed sel, move c to the front; otherwise, move sel to the
-   * front */
-  if (!sel)
-    sel = c;
-  wl_list_remove(&sel->link);
-  wl_list_insert(&clients, &sel->link);
+    /* If we passed sel, move c to the front; otherwise, move sel to the
+     * front */
+    if (!sel)
+      sel = c;
+    wl_list_remove(&sel->link);
+    wl_list_insert(&clients, &sel->link);
 
-  focusclient(sel, 1, 0);
+    focusclient(sel, 1, 0);
+  });
   arrange(selmon);
 }
 
@@ -3609,7 +3633,51 @@ void set_key(Key *ref, char *str) {
     return;
   }
 
-  if (ref->mod & WLR_MODIFIER_SHIFT) {
+  struct xkb_keymap *keymap = kb_group->wlr_group->keyboard.keymap;
+
+  if (!(ref->mod & WLR_MODIFIER_SHIFT))
+    goto end;
+
+  xkb_keycode_t min_kc = xkb_keymap_min_keycode(keymap);
+  xkb_keycode_t max_kc = xkb_keymap_max_keycode(keymap);
+
+  for (xkb_keycode_t kc = min_kc; kc <= max_kc; kc++) {
+    xkb_layout_index_t num_layouts = xkb_keymap_num_layouts_for_key(keymap, kc);
+
+    for (xkb_layout_index_t layout = 0; layout < num_layouts; layout++) {
+
+      const xkb_keysym_t *base_syms;
+      int num_base =
+          xkb_keymap_key_get_syms_by_level(keymap, kc, layout, 0, &base_syms);
+
+      bool match = false;
+      for (int i = 0; i < num_base; i++) {
+        if (base_syms[i] == base) {
+          match = true;
+          break;
+        }
+      }
+
+      if (match) {
+        const xkb_keysym_t *shifted_syms;
+        int num_shifted = xkb_keymap_key_get_syms_by_level(keymap, kc, layout,
+                                                           1, &shifted_syms);
+
+        if (num_shifted > 0) {
+          xkb_keysym_t shifted_sym = shifted_syms[0];
+
+          if (shifted_sym != base) {
+            base = shifted_sym;
+            ref->mod &= ~WLR_MODIFIER_SHIFT;
+          }
+        }
+
+        goto end;
+      }
+    }
+  }
+
+  /*if (ref->mod & WLR_MODIFIER_SHIFT) {
     if (*(str + 1) == '\0') {
       // Single char key
       if (xkb_keysym_to_upper(base) != xkb_keysym_to_lower(base)) {
@@ -3618,8 +3686,9 @@ void set_key(Key *ref, char *str) {
         ref->mod &= ~WLR_MODIFIER_SHIFT;
       }
     }
-  }
+  }*/
 
+end:
   ref->keysym.a = base;
 }
 
@@ -3649,7 +3718,6 @@ void makekeys() {
         temp[i] = '\0';
         tail->vimmode = map->vimmode;
         set_key(tail, buf);
-        printf("Parsed: %s\n", buf);
         buf = NULL;
         if (temp[i + 1] != '\0') {
           tail->next.action = NULL;
@@ -3665,7 +3733,6 @@ void makekeys() {
           buf[1] = '\0';
           tail->vimmode = map->vimmode;
           set_key(tail, buf);
-          printf("Parsed: %s\n", buf);
           free(buf);
           buf = NULL;
           if (temp[i + 1] != '\0') {

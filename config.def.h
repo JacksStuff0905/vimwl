@@ -5,7 +5,8 @@
    ((hex >> 8) & 0xFF) / 255.0f, (hex & 0xFF) / 255.0f}
 /* appearance */
 static const int sloppyfocus = 1; /* focus follows mouse */
-static const int mousefocus = 1; /* mouse follows focus (when switching between clients, like hyprland) */
+static const int mousefocus =
+    1; /* mouse follows focus (when switching between clients, like hyprland) */
 static const int bypass_surface_visibility =
     0; /* 1 means idle inhibitors will disable idle tracking even if it's
           surface isn't visible  */
@@ -124,14 +125,11 @@ static const int key_timeout = 1000;
 // Define your <leader> keybinding
 #define LEADER XKB_KEY_space
 
-#define TAGKEYS(KEY, SKEY, TAG)                                                \
-  {MODKEY, KEY, view, {.ui = 1 << TAG}},                                       \
-      {MODKEY | WLR_MODIFIER_CTRL, KEY, toggleview, {.ui = 1 << TAG}},         \
-      {MODKEY | WLR_MODIFIER_SHIFT, SKEY, tag, {.ui = 1 << TAG}}, {            \
-    MODKEY | WLR_MODIFIER_CTRL | WLR_MODIFIER_SHIFT, SKEY, toggletag, {        \
-      .ui = 1 << TAG                                                           \
-    }                                                                          \
-  }
+#define TAGKEYS(KEY, TAG)                                                     \
+{VIM_MODE_NORMAL, KEY, view, {.ui = 1 << TAG}},                               \
+{VIM_MODE_NORMAL, "<C-" KEY ">", toggleview, {.ui = 1 << TAG}},               \
+{VIM_MODE_NORMAL, "<S-" KEY ">", tag, {.ui = 1 << TAG}},                      \
+{VIM_MODE_NORMAL, "<C-S-" KEY ">", toggletag, { .ui = 1 << TAG }}             \
 
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd)                                                             \
@@ -167,7 +165,7 @@ static const KeyMap keymaps[] = {
     //{ MODKEY,                    XKB_KEY_p,           spawn, {.v =
     // menucmd} },
 
-    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = webbrowsercmd}},
+    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<leader>b", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<leader>ba", spawn, {.v = termcmd}},
 
@@ -180,7 +178,6 @@ static const KeyMap keymaps[] = {
 
     {VIM_MODE_NORMAL, "$", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<S-o>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "!", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "T", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<C-t>", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<C-S-t>", spawn, {.v = termcmd}},
@@ -188,18 +185,26 @@ static const KeyMap keymaps[] = {
     {VIM_MODE_NORMAL, "<C-A-T>", killclient, {0}},
 
     // Quit
-    {VIM_MODE_NORMAL, "<A-S-Esc>", quit, {0}},
+    {VIM_MODE_NORMAL, "<A-Esc>", quit, {0}},
 
     // Navigation
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusstack, {.i = -1}},
 
-    {VIM_MODE_NORMAL, "<C->", moveresize, {.ui = GrabMove}},
-
     {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
-    {VIM_MODE_NORMAL, "<LeftMouse>u", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
     {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
+
+    TAGKEYS("1", 0),
+    TAGKEYS("2", 1),
+    TAGKEYS("3", 2),
+    TAGKEYS("4", 3),
+    TAGKEYS("5", 4),
+    TAGKEYS("6", 5),
+    TAGKEYS("7", 6),
+    TAGKEYS("8", 7),
+    TAGKEYS("9", 8),
+    TAGKEYS("0", 9),
 
 // Quit
 //{VIM_MODE_NORMAL, WLR_MODIFIER_SHIFT, XKB_KEY_q, quit, {0}},
