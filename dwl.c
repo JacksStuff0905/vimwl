@@ -1741,19 +1741,19 @@ Client *getneighbor(const Client *c, const uint8_t dir) {
   double dist;
   int tx, ty;
   switch (dir) {
-  case 0:
+  case WLR_DIRECTION_UP:
     tx = 0;
     ty = -1;
     break;
-  case 1:
+  case WLR_DIRECTION_RIGHT:
     tx = 1;
     ty = 0;
     break;
-  case 2:
+  case WLR_DIRECTION_DOWN:
     tx = 0;
     ty = 1;
     break;
-  case 3:
+  case WLR_DIRECTION_LEFT:
     tx = -1;
     ty = 0;
     break;
@@ -1773,8 +1773,9 @@ Client *getneighbor(const Client *c, const uint8_t dir) {
     double ndot = DOT(nx, ny, tx, ty);
     if (ndot < 0)
       continue;
-    if (!res || ((dot < 0.86 || ndot < 0.86) ? (dot < ndot)
-                                             : (dot / dist * AREA(res) < ndot / ndist * AREA(n)))) {
+    if (!res || ((dot < 0.86 || ndot < 0.86)
+                     ? (dot < ndot)
+                     : (dot / dist * AREA(res) < ndot / ndist * AREA(n)))) {
       res = n;
       dot = ndot;
       dist = ndist;

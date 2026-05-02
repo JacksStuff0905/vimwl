@@ -161,40 +161,52 @@ static const VimModeKey vimmodekeys[] = {
     {"V", VIM_MODE_VISUAL},
 };
 
+
+/*
+ * Keymaps follow the vim syntax 
+ *
+ * Examples:
+ *  'abc' -> keys a, b & c pressed in a consecutive order
+ *  '<Alt>' -> the Alt key being pressed once
+ *  '<CR>t' -> Enter & t being pressed in a consecutive order
+ * 
+ * You can add modifiers to specific keys inside of angle brackets (<>):
+ *  '<S-b>' -> the b key being pressed while Shift is held down (the same as 'B')
+ *
+ * Available key modifiers:
+ * Shift -> '<S-...>' (in case of letters, you can just use the uppercase version instead, e.g. '<S-e>' => 'E')
+ * Control -> '<C-...>'
+ * Alt/Meta -> '<A-...>' or '<M-...>'
+ * Super -> '<D-...>'
+ *
+ */
+
 static const KeyMap keymaps[] = {
-    /* Note that Shift changes certain key codes: 2 -> at, etc. */
-    /* modifier                  key                  function argument */
-    //{ MODKEY,                    XKB_KEY_p,           spawn, {.v =
-    // menucmd} },
-
-    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<leader>b", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<leader>ba", spawn, {.v = termcmd}},
-
     // Kill client
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "x", killclient, {0}},
     {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "d", killclient, {0}},
 
     // Apps
+    {VIM_MODE_NORMAL, "<CR>", spawn, {.v = termcmd}},
     {VIM_MODE_NORMAL, "<leader>wb", spawn, {.v = webbrowsercmd}},
-
-    {VIM_MODE_NORMAL, "$", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<S-o>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "T", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<C-t>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<C-S-t>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<C-A-t>", spawn, {.v = termcmd}},
-    {VIM_MODE_NORMAL, "<C-A-T>", killclient, {0}},
 
     // Quit
     {VIM_MODE_NORMAL, "<A-Esc>", quit, {0}},
 
-    // Navigation
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusdir, {.i = 0}},
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "l", focusdir, {.i = 1}},
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusdir, {.i = 2}},
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "h", focusdir, {.i = 3}},
+    // Navigation (depending on your layout, you might want to use focusdir or focusstack)
+    /* focusdir -> left/right/up/down (best for dwindle-like layouts) */
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusdir, {.i = WLR_DIRECTION_UP}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "l", focusdir, {.i = WLR_DIRECTION_RIGHT}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusdir, {.i = WLR_DIRECTION_DOWN}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "h", focusdir, {.i = WLR_DIRECTION_LEFT}},
 
+    /* focusstack -> +1/-1 (best for master-like layouts) */
+    /*
+     * {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},
+     * {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusstack, {.i = -1}},
+    */
+
+    // Mouse bindings
     {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
     {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
     {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
