@@ -376,11 +376,13 @@ static void focusclient(Client *c, int lift, int focus_mouse);
 static void removeselection(Client *c);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
+static void focusdir(const Arg *arg);
 static Client *focustop(Monitor *m);
 static void fullscreennotify(struct wl_listener *listener, void *data);
 static void gpureset(struct wl_listener *listener, void *data);
 static void handlesig(int signo);
 static void incnmaster(const Arg *arg);
+static Client *getneighbor(const Client *c, const uint8_t dir);
 static void inputdevice(struct wl_listener *listener, void *data);
 static int check_key_buffer_timeout(void *data);
 static bool apply_action(Action *a, bool if_queued);
@@ -430,6 +432,7 @@ static void startdrag(struct wl_listener *listener, void *data);
 static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static void tile(Monitor *m);
+static void dwindle(Monitor *m);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
 static void toggletag(const Arg *arg);
@@ -1661,6 +1664,13 @@ void focusstack(const Arg *arg) {
   focusclient(c, 1, 1);
 }
 
+void focusdir(const Arg *arg) {
+  Client *c, *sel = focustop(selmon);
+  c = getneighbor(sel, arg->i);
+  if (c)
+    focusclient(c, 1, 1);
+}
+
 /* We probably should change the name of this: it sounds like it
  * will focus the topmost client of this mon, when actually will
  * only return that client */
@@ -1714,6 +1724,64 @@ void incnmaster(const Arg *arg) {
     return;
   selmon->nmaster = MAX(selmon->nmaster + arg->i, 0);
   arrange(selmon);
+}
+
+Client *getneighbor(const Client *c, const uint8_t dir) {
+/* dir: 0 -> +x, 1 -> -y, 2 -> -x, 3 -> +y */
+#define DISTX(cl)                                                              \
+  ((cl->geom.x + cl->geom.width / 2) - (c->geom.x + c->geom.width / 2))
+#define DISTY(cl)                                                              \
+  ((cl->geom.y + cl->geom.height / 2) - (c->geom.y + c->geom.height / 2))
+#define VECLENGTH(x, y) (sqrt(x * x + y * y))
+#define DOT(x1, y1, x2, y2) ((x1 * x2) + (y1 * y2))
+#define AREA(cl) (cl->geom.width * cl->geom.height)
+
+  Client *n, *res = NULL;
+  double dot = -2;
+  double dist;
+  int tx, ty;
+  switch (dir) {
+  case 0:
+    tx = 0;
+    ty = -1;
+    break;
+  case 1:
+    tx = 1;
+    ty = 0;
+    break;
+  case 2:
+    tx = 0;
+    ty = 1;
+    break;
+  case 3:
+    tx = -1;
+    ty = 0;
+    break;
+  default:
+    return res;
+  }
+  wl_list_for_each(n, &clients, link) {
+    if (!VISIBLEON(n, c->mon) || n == c /*|| n->isfloating */ ||
+        n->isfullscreen)
+      continue;
+    double nx, ny;
+    nx = DISTX(n);
+    ny = DISTY(n);
+    double ndist = VECLENGTH(nx, ny);
+    nx /= ndist;
+    ny /= ndist;
+    double ndot = DOT(nx, ny, tx, ty);
+    if (ndot < 0)
+      continue;
+    if (!res || ((dot < 0.86 || ndot < 0.86) ? (dot < ndot)
+                                             : (dot / dist * AREA(res) < ndot / ndist * AREA(n)))) {
+      res = n;
+      dot = ndot;
+      dist = ndist;
+    }
+  }
+
+  return res;
 }
 
 void inputdevice(struct wl_listener *listener, void *data) {
@@ -3101,6 +3169,58 @@ void tile(Monitor *m) {
              0);
       ty += c->geom.height;
     }
+    i++;
+  }
+}
+
+/*
+ * https://codeberg.org/dwl/dwl-patches/src/branch/main/patches/dwindle/dwindle.patch
+ */
+void dwindle(Monitor *m) {
+  unsigned int i, n = 0;
+  int nx, ny, nw, nh;
+  int horizontal;
+  Client *c;
+
+  /* count clients */
+  wl_list_for_each(c, &clients, link) if (VISIBLEON(c, m) && !c->isfloating &&
+                                          !c->isfullscreen) n++;
+
+  if (n == 0)
+    return;
+
+  nx = m->w.x;
+  ny = m->w.y;
+  nw = m->w.width;
+  nh = m->w.height;
+
+  horizontal = 1; // toggle split direction
+  i = 0;
+
+  wl_list_for_each(c, &clients, link) {
+    if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+      continue;
+
+    if (i == n - 1) {
+      /* last window gets remaining space */
+      resize(c, (struct wlr_box){nx, ny, nw, nh}, 0);
+    } else if (horizontal) {
+      int w = nw / 2;
+
+      resize(c, (struct wlr_box){nx, ny, w, nh}, 0);
+
+      nx += w;
+      nw -= w;
+    } else {
+      int h = nh / 2;
+
+      resize(c, (struct wlr_box){nx, ny, nw, h}, 0);
+
+      ny += h;
+      nh -= h;
+    }
+
+    horizontal = !horizontal;
     i++;
   }
 }

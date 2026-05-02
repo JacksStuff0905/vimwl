@@ -41,6 +41,7 @@ static const Layout layouts[] = {
     {"[]=", tile},
     {"><>", NULL}, /* no layout function means floating behavior */
     {"[M]", monocle},
+    {"[\\]", dwindle},
 };
 
 /* monitors */
@@ -125,11 +126,12 @@ static const int key_timeout = 1000;
 // Define your <leader> keybinding
 #define LEADER XKB_KEY_space
 
-#define TAGKEYS(KEY, TAG)                                                     \
-{VIM_MODE_NORMAL, KEY, view, {.ui = 1 << TAG}},                               \
-{VIM_MODE_NORMAL, "<C-" KEY ">", toggleview, {.ui = 1 << TAG}},               \
-{VIM_MODE_NORMAL, "<S-" KEY ">", tag, {.ui = 1 << TAG}},                      \
-{VIM_MODE_NORMAL, "<C-S-" KEY ">", toggletag, { .ui = 1 << TAG }}             \
+#define TAGKEYS(KEY, TAG)                                                      \
+  {VIM_MODE_NORMAL, KEY, view, {.ui = 1 << TAG}},                              \
+      {VIM_MODE_NORMAL, "<C-" KEY ">", toggleview, {.ui = 1 << TAG}},          \
+      {VIM_MODE_NORMAL, "<S-" KEY ">", tag, {.ui = 1 << TAG}}, {               \
+    VIM_MODE_NORMAL, "<C-S-" KEY ">", toggletag, { .ui = 1 << TAG }            \
+  }
 
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd)                                                             \
@@ -188,13 +190,22 @@ static const KeyMap keymaps[] = {
     {VIM_MODE_NORMAL, "<A-Esc>", quit, {0}},
 
     // Navigation
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusstack, {.i = +1}},
-    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusstack, {.i = -1}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "k", focusdir, {.i = 0}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "l", focusdir, {.i = 1}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "j", focusdir, {.i = 2}},
+    {VIM_MODE_NORMAL | VIM_MODE_VISUAL, "h", focusdir, {.i = 3}},
 
     {VIM_MODE_NORMAL, "<LeftDrag>", moveresize, {.ui = GrabMove}},
     {VIM_MODE_NORMAL, "<MiddleMouse>", togglefloating, {0}},
     {VIM_MODE_NORMAL, "<RightDrag>", moveresize, {.ui = GrabResize}},
 
+    // Layouts
+    {VIM_MODE_NORMAL, "<leader>tl", setlayout, {.v = &layouts[0]}},
+    {VIM_MODE_NORMAL, "<leader>fl", setlayout, {.v = &layouts[1]}},
+    {VIM_MODE_NORMAL, "<leader>mn", setlayout, {.v = &layouts[2]}},
+    {VIM_MODE_NORMAL, "<leader>dw", setlayout, {.v = &layouts[3]}},
+
+    // Tags
     TAGKEYS("1", 0),
     TAGKEYS("2", 1),
     TAGKEYS("3", 2),
