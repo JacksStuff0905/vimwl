@@ -1,0 +1,173 @@
+From a5f327b7d8290c75ca00e84d45c1189f2fb9d4ee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jacek=20Sawi=C5=84ski?= <jacek.sawinski.0905@gmail.com>
+Date: Sat, 2 May 2026 15:00:48 +0200
+Subject: [PATCH] Added vimwl integration
+
+---
+ src/bar.c        | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/bar.h        |  4 ++++
+ src/config.def.h |  6 ++++++
+ src/main.c       |  9 +++++++++
+ 4 files changed, 66 insertions(+)
+
+diff --git a/src/bar.c b/src/bar.c
+index ee7bcf9..3e6bff7 100644
+--- a/src/bar.c
++++ b/src/bar.c
+@@ -23,6 +23,8 @@ static void bar_render(struct Pipeline *pipeline, void *data, cairo_t *painter,
+ static void bar_tags_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y);
+ static void bar_title_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y);
+ static void bar_status_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y);
++static void bar_key_buffer_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y);
++static void bar_vimmode_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y);
+ static int bar_width(struct Pipeline *pipeline, void *data, unsigned int future_widths);
+ 
+ const struct PipelineListener bar_pipeline_listener = { .render = bar_render, .width = bar_width, };
+@@ -100,6 +102,8 @@ void bar_bounds(void *data, double *x, double *y, double *width, double *height)
+     bar_width += bar->layout->width;
+     bar_width += bar->title->width;
+     bar_width += bar->status->width;
++    bar_width += bar->key_buffer->width;
++    bar_width += bar->vimmode->width;
+ 
+     *x = bar->x;
+     *y = bar->y;
+@@ -139,6 +143,8 @@ struct Bar *bar_create(struct List *hotspots, struct Pipeline *pipeline) {
+     bar->title = bar_component_create(pipeline);
+     bar->layout = bar_component_create(pipeline);
+     bar->status = bar_component_create(pipeline);
++    bar->key_buffer = bar_component_create(pipeline);
++    bar->vimmode = bar_component_create(pipeline);
+ 
+     char *status = string_create("dwl %.1f", VERSION);
+     pango_layout_set_text(bar->status->layout, status, strlen(status));
+@@ -170,6 +176,8 @@ void bar_destroy(struct Bar *bar) {
+     basic_component_destroy(bar->title);
+     basic_component_destroy(bar->layout);
+     basic_component_destroy(bar->status);
++    basic_component_destroy(bar->key_buffer);
++    basic_component_destroy(bar->vimmode);
+     struct Tag *tag;
+     for (int i = 0; i < LENGTH(bar->tags); i++) {
+         tag = &bar->tags[i];
+@@ -200,6 +208,8 @@ void bar_render(struct Pipeline *pipeline, void *data, cairo_t *painter, int *x,
+     bar_tags_render(pipeline, bar, painter, x, y);
+     bar_layout_render(pipeline, bar, painter, x, y);
+     bar_title_render(pipeline, bar, painter, x, y);
++    bar_key_buffer_render(pipeline, bar, painter, x, y);
++    bar_vimmode_render(pipeline, bar, painter, x, y);
+     bar_status_render(pipeline, bar, painter, x, y);
+ }
+ 
+@@ -252,6 +262,7 @@ void bar_title_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *paint
+         pipeline_set_colorscheme(pipeline, schemes[InActive_Scheme]);
+ 
+     bar->title->width = pipeline->shm->width - *x - bar_component_width(bar->status, pipeline) - pipeline_get_future_widths(pipeline);
++    bar->title->width -= bar_component_width(bar->key_buffer, pipeline) + bar_component_width(bar->vimmode, pipeline);
+     bar->title->height = pipeline->shm->height;
+ 
+     if (bar_component_width(bar->title, pipeline) > bar->title->width)
+@@ -376,3 +387,39 @@ int bar_width(struct Pipeline *pipeline, void *data, unsigned int future_widths)
+ 
+     return width;
+ }
++
++void bar_set_key_buffer(struct Bar *bar, const char *text) {
++    if (!bar) return;
++
++    pango_layout_set_text(bar->key_buffer->layout, text, -1);
++}
++
++void bar_set_vimmode(struct Bar *bar, unsigned int vimmode) {
++    if (!bar) return;
++
++    pango_layout_set_text(bar->vimmode->layout, vimmodes[vimmode], -1);
++}
++
++void bar_key_buffer_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y) {
++    if (!bar || !pipeline)
++        return;
++
++    bar->key_buffer->width = bar_component_width(bar->key_buffer, pipeline);
++    bar->key_buffer->height = pipeline->shm->height;
++    pipeline_set_colorscheme(pipeline, schemes[InActive_Scheme]);
++    basic_component_render(bar->key_buffer, pipeline, painter, x, y);
++
++    *x += bar->key_buffer->width;
++}
++
++void bar_vimmode_render(struct Pipeline *pipeline, struct Bar *bar, cairo_t *painter, int *x, int *y) {
++    if (!bar || !pipeline)
++        return;
++
++    bar->vimmode->width = bar_component_width(bar->vimmode, pipeline);
++    bar->vimmode->height = pipeline->shm->height;
++    pipeline_set_colorscheme(pipeline, schemes[InActive_Scheme]);
++    basic_component_render(bar->vimmode, pipeline, painter, x, y);
++
++    *x += bar->vimmode->width;
++}
+diff --git a/src/bar.h b/src/bar.h
+index 9a97157..9cf80fa 100644
+--- a/src/bar.h
++++ b/src/bar.h
+@@ -22,6 +22,8 @@ struct Bar {
+ 
+     unsigned int active, floating;
+     unsigned int x, y;
++
++    struct BasicComponent *key_buffer, *vimmode;
+ };
+ 
+ struct Bar *bar_create(struct List *hotspots, struct Pipeline *pipeline);
+@@ -33,6 +35,8 @@ void bar_set_status(struct Bar *bar, const char *text);
+ void bar_set_tag(struct Bar *bar, unsigned int index,
+         unsigned int state, unsigned int occupied, unsigned int focusedClient);
+ void bar_set_title(struct Bar *bar, const char *text);
++void bar_set_key_buffer(struct Bar *bar, const char *text);
++void bar_set_vimmode(struct Bar *bar, unsigned int vimmode);
+ 
+ extern const struct PipelineListener bar_pipeline_listener;
+ 
+diff --git a/src/config.def.h b/src/config.def.h
+index ce34395..c104e57 100644
+--- a/src/config.def.h
++++ b/src/config.def.h
+@@ -33,6 +33,12 @@ static const int *schemes[3][2] = {
+     [Urgent_Scheme]   = {grey1, grey3},
+ };
+ 
++/* Vimmode labels from vimwl */
++static const char *vimmodes[] = {
++    [1] = "NORMAL", [2] = "INSERT",   [4] = "VISUAL",
++    [8] = "COMMAND",    [16] = "REPLACE",
++};
++
+ /*
+  * Tags
+  * Must not exceed 31 tags and amount must match dwl's tagcount.
+diff --git a/src/main.c b/src/main.c
+index d21efe1..2c670d3 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -479,8 +479,17 @@ void stdin_handle(const char *line) {
+         char *layout = to_delimiter(line, &loc, '\n');
+         bar_set_layout(monitor->bar, layout);
+         free(layout);
++    } else if (STRING_EQUAL(command, "buffer")) {
++        char *key_buffer = to_delimiter(line, &loc, '\n');
++        bar_set_key_buffer(monitor->bar, key_buffer);
++        free(key_buffer);
++    } else if (STRING_EQUAL(command, "vimmode")) {
++        char *vimmode = to_delimiter(line, &loc, '\n');
++        bar_set_vimmode(monitor->bar, atoi(vimmode));
++        free(vimmode);
+     }
+ 
++
+     free(command);
+     monitor_update(monitor);
+ }
+-- 
+2.53.0
+
