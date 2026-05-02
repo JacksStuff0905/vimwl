@@ -1749,6 +1749,8 @@ int check_key_buffer_timeout(void *data) {
 
   apply_queued_actions(true);
 
+  printstatus();
+
   wl_event_source_timer_update(key_buffer_timeout_timer, 0); // Stop timer
   return 0;
 }
@@ -1790,9 +1792,9 @@ void apply_queued_actions(bool reset) {
           (*k)->next.action->queued = false;
         *k = (*k)->start;
       }
-
-      printstatus();
     }
+
+    printstatus();
   }
 }
 
@@ -1848,8 +1850,30 @@ int keybinding(uint32_t mods, xkb_keysym_t sym) {
     }
   }
 
-  if (action_count > 0)
+  if (action_count > 0) {
     wl_event_source_timer_update(key_buffer_timeout_timer, key_timeout);
+
+    char utf8[8];
+    int count = xkb_keysym_to_utf8(sym, utf8, sizeof(utf8));
+    if (count == 2 && utf8[0] >= '!' && utf8[0] <= '~') {
+      // Pretty-printable codes
+      int i = 0;
+      for (; *(key_buffer + i) != '\0'; i++)
+        ;
+      *(key_buffer + i) = utf8[0];
+      *(key_buffer + i + 1) = '\0';
+    } else {
+      // Fallback to ascii / utf code
+      for (int i = 0; i < count - 1; i++) {
+        char tmp[4];
+        sprintf(tmp, "%02x", (unsigned char)utf8[i]);
+        strcat(key_buffer, "<");
+        strcat(key_buffer, tmp);
+        strcat(key_buffer, ">");
+      }
+    }
+    printstatus();
+  }
 
   if (action_count == 1) {
     // If there are no conflicts
@@ -1970,26 +1994,6 @@ void keypress(struct wl_listener *listener, void *data) {
       end:
         handled = keybinding(mods, curr_sym);
         if (handled) {
-          char utf8[8];
-          int count = xkb_keysym_to_utf8(curr_sym, utf8, sizeof(utf8));
-          if (count == 2 && utf8[0] >= '!' && utf8[0] <= '~') {
-            // Pretty-printable codes
-            int i = 0;
-            for (; *(key_buffer + i) != '\0'; i++)
-              ;
-            *(key_buffer + i) = utf8[0];
-            *(key_buffer + i + 1) = '\0';
-          } else {
-            // Fallback to ascii / utf code
-            for (int i = 0; i < count - 1; i++) {
-              char tmp[4];
-              sprintf(tmp, "%02x", (unsigned char)utf8[i]);
-              strcat(key_buffer, "<");
-              strcat(key_buffer, tmp);
-              strcat(key_buffer, ">");
-            }
-          }
-          printstatus();
           break;
         }
       }
@@ -3473,8 +3477,12 @@ int setvimmode(const uint8_t mode) {
       // Unfocus all clients, since not in insert mode
       wlr_seat_keyboard_clear_focus(seat);
     }
+
+    printstatus();
     return 1;
   }
+
+  printstatus();
   return 0;
 }
 
